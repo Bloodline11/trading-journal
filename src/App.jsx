@@ -1,4 +1,5 @@
-import { BrowserRouter, Routes, Route, Navigate } from "react-router-dom";
+// src/App.jsx
+import { HashRouter, Routes, Route, Navigate } from "react-router-dom";
 import { useEffect, useState } from "react";
 import { supabase } from "./lib/supabase";
 
@@ -38,7 +39,7 @@ export default function App() {
   if (loading) return null;
 
   return (
-    <BrowserRouter>
+    <HashRouter>
       <Routes>
         {!session ? (
           <>
@@ -57,6 +58,6 @@ export default function App() {
           </Route>
         )}
       </Routes>
-    </BrowserRouter>
+    </HashRouter>
   );
 }
