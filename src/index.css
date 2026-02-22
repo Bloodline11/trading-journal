@@ -2,5 +2,157 @@
 @tailwind components;
 @tailwind utilities;
 
-:root { color-scheme: dark; }
-body { margin: 0; }
+/* TerminalX theme: flat charcoal, steel silver wordmark, steel-blue X */
+:root {
+  color-scheme: dark;
+
+  --tx-bg: #0a0b0d;        /* flat charcoal */
+  --tx-panel: #101216;     /* card/panel */
+  --tx-border: #242833;    /* borders */
+  --tx-text: #e5e7eb;
+
+  --tx-silver: #b7bcc6;    /* steel silver */
+  --tx-blue: #3b82f6;      /* steel blue */
+}
+
+html, body { height: 100%; }
+body {
+  margin: 0;
+  background: var(--tx-bg);
+  color: var(--tx-text);
+}
+
+/* Page wrapper (auth pages use this) */
+.tx-page {
+  background: var(--tx-bg);
+  position: relative;
+  isolation: isolate;
+}
+
+.tx-bg-ornament {
+  position: absolute;
+  inset: 0;
+  z-index: -1;
+  pointer-events: none;
+  /* keep it flat + vignette only (no blobs) */
+  background: linear-gradient(to bottom, rgba(0,0,0,0.35), rgba(0,0,0,0.70));
+}
+
+.tx-bg-ornament::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background-image:
+    linear-gradient(to right, rgba(255,255,255,0.035) 1px, transparent 1px),
+    linear-gradient(to bottom, rgba(255,255,255,0.035) 1px, transparent 1px);
+  background-size: 56px 56px;
+  opacity: 0.22;
+  mask-image: radial-gradient(70% 60% at 50% 40%, black 35%, transparent 70%);
+}
+
+/* ===== TerminalX Tron Rail Border =====
+   - Keep a subtle silver rail
+   - Blue streak clockwise
+   - Red streak counter-clockwise
+*/
+.tx-streak-border {
+  position: relative;
+  border-radius: 16px;
+  border: 1px solid var(--tx-border);   /* base rail */
+  overflow: hidden;
+}
+
+/* Two moving streak rails (thin ring only) */
+.tx-streak-border::before,
+.tx-streak-border::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  padding: 1px;                 /* ring thickness */
+  pointer-events: none;
+
+  /* Mask so only the ring shows */
+  mask:
+    linear-gradient(#000 0 0) content-box,
+    linear-gradient(#000 0 0);
+  mask-composite: exclude;
+  -webkit-mask:
+    linear-gradient(#000 0 0) content-box,
+    linear-gradient(#000 0 0);
+  -webkit-mask-composite: xor;
+}
+
+/* Blue streak */
+.tx-streak-border::before {
+  background:
+    conic-gradient(
+      from 0deg,
+      transparent 0deg,
+      transparent 300deg,
+      rgba(59,130,246,0.95) 320deg,
+      transparent 340deg
+    );
+  animation: tx-blue-spin 3.6s linear infinite;
+}
+
+/* Red streak */
+.tx-streak-border::after {
+  background:
+    conic-gradient(
+      from 180deg,
+      transparent 0deg,
+      transparent 300deg,
+      rgba(239,68,68,0.85) 320deg,
+      transparent 340deg
+    );
+  animation: tx-red-spin 4.6s linear infinite;
+}
+
+@keyframes tx-blue-spin { to { transform: rotate(360deg); } }
+@keyframes tx-red-spin  { to { transform: rotate(-360deg); } }
+
+/* Inputs / buttons */
+@layer components {
+  .tx-label {
+    @apply block text-[11px] text-zinc-500 mb-1;
+  }
+
+  .tx-input {
+    @apply w-full px-3 py-2 rounded-lg bg-zinc-900/70 border border-zinc-800 text-zinc-100
+           placeholder:text-zinc-600 outline-none;
+  }
+  .tx-input:focus {
+    border-color: rgba(59,130,246,0.45);
+    box-shadow: 0 0 0 3px rgba(59,130,246,0.12);
+  }
+
+  .tx-btn {
+    @apply inline-flex items-center justify-center rounded-lg px-4 py-2 text-sm font-medium
+           border border-zinc-800 transition;
+  }
+  .tx-btn-primary {
+    @apply bg-zinc-900/70 hover:bg-zinc-900 text-zinc-100;
+  }
+  .tx-btn-primary:hover { border-color: rgba(59,130,246,0.35); }
+
+  .tx-btn-secondary {
+    @apply bg-transparent hover:bg-zinc-900/40 text-zinc-200;
+  }
+  .tx-btn-secondary:hover { border-color: rgba(239,68,68,0.28); }
+
+  .tx-alert {
+    @apply text-sm rounded-lg border px-3 py-2;
+  }
+  .tx-alert-red {
+    @apply border-red-900/40 bg-red-950/25 text-red-200;
+  }
+}
+
+/* Small UI bits */
+.tx-dot { width: 8px; height: 8px; border-radius: 999px; display: inline-block; }
+.tx-dot-blue { background: rgba(59,130,246,0.6); box-shadow: 0 0 10px rgba(59,130,246,0.25); }
+.tx-dot-red { background: rgba(239,68,68,0.55); box-shadow: 0 0 10px rgba(239,68,68,0.20); }
+
+.tx-caret { opacity: 0.9; animation: tx-blink 1.05s steps(2, end) infinite; }
+@keyframes tx-blink { 50% { opacity: 0.0; } }

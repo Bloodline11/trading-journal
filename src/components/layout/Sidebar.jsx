@@ -1,13 +1,13 @@
 import { NavLink } from "react-router-dom";
 
 const navLinkBase =
-  "flex items-center gap-3 rounded-md px-3 py-2 text-sm transition-colors border border-transparent";
+  "flex items-center gap-3 rounded-md px-3 py-2 text-sm transition-colors border";
 
 const navLinkActive =
-  "bg-zinc-900 text-zinc-50 border-zinc-800";
+  "bg-zinc-900 text-blue-300 border-zinc-800";
 
 const navLinkIdle =
-  "text-zinc-300 hover:text-zinc-50 hover:bg-zinc-900/60";
+  "border-transparent text-zinc-400 hover:text-zinc-100 hover:bg-zinc-900 hover:border-zinc-800";
 
 function Item({ to, label, end = false }) {
   return (
@@ -18,29 +18,23 @@ function Item({ to, label, end = false }) {
         `${navLinkBase} ${isActive ? navLinkActive : navLinkIdle}`
       }
     >
-      <span className="text-zinc-400">•</span>
-      <span className="font-medium">{label}</span>
+      {label}
     </NavLink>
   );
 }
 
 export default function Sidebar() {
   return (
-    <aside className="w-[260px] shrink-0 border-r border-zinc-900 bg-zinc-950">
-      <div className="px-4 py-4 border-b border-zinc-900">
-        <div className="text-zinc-50 font-semibold tracking-tight">
-          Trading Journal
-        </div>
-        <div className="text-xs text-zinc-400 mt-1">
-          Performance tracking (futures)
-        </div>
+    <aside className="w-60 bg-zinc-950 border-r border-zinc-800 flex flex-col">
+      <div className="h-14 flex items-center px-5 border-b border-zinc-800 text-sm font-semibold tracking-wider">
+        <span style={{ color: "var(--tx-silver)" }}>Terminal</span>
+        <span style={{ color: "var(--tx-blue)" }}>X</span>
       </div>
 
-      <nav className="px-3 py-3 space-y-1">
+      <nav className="flex-1 px-3 py-4 space-y-1">
         <Item to="/" label="Dashboard" end />
         <Item to="/trades" label="Trades" />
         <Item to="/trades/new" label="Add Trade" />
-        <div className="my-2 border-t border-zinc-900" />
         <Item to="/analytics" label="Analytics" />
         <Item to="/settings" label="Settings" />
       </nav>

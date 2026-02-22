@@ -1,3 +1,4 @@
+console.log("THIS IS THE ANALYTICS FILE RUNNING");
 import { useEffect, useState } from "react";
 import { supabase } from "../lib/supabase";
 import { useNavigate } from "react-router-dom";
@@ -13,10 +14,15 @@ export default function Trades() {
     setError("");
     setLoading(true);
 
-    const { data, error } = await supabase
-      .from("trades")
-      .select("*")
-      .order("created_at", { ascending: false });
+    const {
+  data: { user },
+} = await supabase.auth.getUser();
+
+const { data, error } = await supabase
+  .from("trades")
+  .select("*")
+  .eq("user_id", user.id)
+  .order("created_at", { ascending: false });
 
     setLoading(false);
 

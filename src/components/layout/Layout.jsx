@@ -6,24 +6,18 @@ import { ensureDefaultAccount } from "../../lib/ensureAccount";
 
 export default function Layout() {
   useEffect(() => {
-    // Ensures every user has an accounts row (name: "Main", initial_balance: 0)
-    // Users never run SQL — the app does it automatically after login.
     ensureDefaultAccount().catch((err) => {
-      console.error("ensureDefaultAccount failed:", err);
+      console.error("ensureDefaultAccount error:", err);
     });
   }, []);
 
   return (
-    <div className="min-h-screen bg-zinc-950 text-zinc-50 flex">
+    <div className="min-h-screen bg-zinc-950 text-zinc-100 flex">
       <Sidebar />
-
-      <div className="flex-1 min-w-0 flex flex-col">
+      <div className="flex-1 flex flex-col border-l border-zinc-800 bg-zinc-950">
         <Topbar />
-
-        <main className="flex-1 min-w-0 overflow-x-hidden">
-          <div className="p-4 md:p-6 max-w-[1600px] w-full mx-auto">
-            <Outlet />
-          </div>
+        <main className="flex-1 p-6 bg-zinc-950">
+          <Outlet />
         </main>
       </div>
     </div>

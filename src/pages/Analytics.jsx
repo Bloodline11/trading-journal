@@ -1,3 +1,4 @@
+console.log("THIS IS THE ANALYTICS FILE RUNNING");
 // src/pages/Analytics.jsx
 import { useEffect, useMemo, useState } from "react";
 import { useSearchParams } from "react-router-dom";
@@ -345,16 +346,17 @@ export default function Analytics() {
       const { data, error } = await supabase
         .from("trades")
         .select("*")
-        .order("entry_time", { ascending: true });
+        .order("created_at", { ascending: true });
 
       if (!alive) return;
 
       if (error) {
-        console.error("Analytics trades load error:", error);
-        setTrades([]);
-        setLoading(false);
-        return;
-      }
+  console.error("Analytics trades load error:", error);
+  alert("Analytics load failed. Check console.");
+  setTrades([]);
+  setLoading(false);
+  return;
+}
 
       setTrades(data || []);
       setLoading(false);
@@ -429,7 +431,7 @@ export default function Analytics() {
         <div>
           <div className="text-xl font-semibold text-zinc-100">Analytics</div>
           <div className="text-xs text-zinc-500 mt-1">
-            Filters via URL: <span className="text-zinc-300">from</span>, <span className="text-zinc-300">to</span>,{" "}
+            //: <span className="text-zinc-300">from</span>, <span className="text-zinc-300">to</span>,{" "}
             <span className="text-zinc-300">symbol</span>, <span className="text-zinc-300">asset</span>,{" "}
             <span className="text-zinc-300">side</span>
           </div>
@@ -473,7 +475,7 @@ export default function Analytics() {
       </div>
 
       {/* Equity Curve */}
-      <Card title="Equity Curve" subtitle="Cumulative PnL over time (filtered sample).">
+      <Card title="Equity Curve" subtitle="Cumulative PnL over time .">
         <div className="h-[280px]">
           {equity.length === 0 ? (
             <div className="h-full flex items-center justify-center text-sm text-zinc-500">No trades for current filters.</div>
@@ -511,62 +513,9 @@ export default function Analytics() {
         </div>
       </Card>
 
-      {/* Daily PnL */}
-      <Card title="Daily PnL" subtitle="Sum of PnL per UTC day.">
-        <div className="h-[280px]">
-          {daily.length === 0 ? (
-            <div className="h-full flex items-center justify-center text-sm text-zinc-500">No trades for current filters.</div>
-          ) : (
-            <ResponsiveContainer>
-              <BarChart data={daily}>
-                <CartesianGrid stroke={CHART.grid} strokeDasharray="3 3" />
-                <XAxis dataKey="day" tick={{ fill: CHART.axis, fontSize: 11 }} minTickGap={18} />
-                <YAxis tick={{ fill: CHART.axis, fontSize: 11 }} />
-                <Tooltip content={<DarkTooltip />} cursor={{ fill: "transparent" }} />
-                <ReferenceLine y={0} stroke={CHART.zero} />
-                <Bar dataKey="pnlPos" name="PnL +" fill={CHART.pos} radius={[6, 6, 0, 0]} />
-                <Bar dataKey="pnlNeg" name="PnL -" fill={CHART.neg} radius={[6, 6, 0, 0]} />
-              </BarChart>
-            </ResponsiveContainer>
-          )}
-        </div>
-      </Card>
 
-      {/* Weekday Average */}
-      <Card title="Weekday Avg PnL" subtitle="Average PnL per trade by weekday (UTC).">
-        <div className="h-[280px]">
-          {weekdayAvg.length === 0 ? (
-            <div className="h-full flex items-center justify-center text-sm text-zinc-500">No trades for current filters.</div>
-          ) : (
-            <ResponsiveContainer>
-              <BarChart data={weekdayAvg}>
-                <CartesianGrid stroke={CHART.grid} strokeDasharray="3 3" />
-                <XAxis dataKey="wd" tick={{ fill: CHART.axis, fontSize: 11 }} />
-                <YAxis tick={{ fill: CHART.axis, fontSize: 11 }} />
-                <Tooltip
-                  content={({ active, payload, label }) => {
-                    if (!active || !payload || !payload.length) return null;
-                    const v = Number(payload[0]?.value);
-                    const n = weekdayAvg.find((x) => x.wd === label)?.n || 0;
-                    return (
-                      <div className="rounded-xl border border-zinc-800 bg-zinc-950/95 px-3 py-2 shadow-lg">
-                        <div className="text-[11px] text-zinc-500 mb-1">
-                          {label} • n={n}
-                        </div>
-                        <div className={`text-sm font-semibold tabular-nums ${pnlTextClass(v)}`}>${fmtMoney(v)}</div>
-                      </div>
-                    );
-                  }}
-                  cursor={{ fill: "transparent" }}
-                />
-                <ReferenceLine y={0} stroke={CHART.zero} />
-                <Bar dataKey="avgPos" name="Avg +" fill={CHART.pos} radius={[6, 6, 0, 0]} />
-                <Bar dataKey="avgNeg" name="Avg -" fill={CHART.neg} radius={[6, 6, 0, 0]} />
-              </BarChart>
-            </ResponsiveContainer>
-          )}
-        </div>
-      </Card>
+
+   
 
       {/* Rolling Expectancy */}
       <Card title="Rolling 30-Trade Avg PnL (Expectancy)" subtitle="Edge stability monitor: rolling mean PnL over the last 30 trades.">
@@ -589,17 +538,7 @@ export default function Analytics() {
         </div>
       </Card>
 
-      {/* PnL Heatmap */}
-      <Card
-        title="PnL Heatmap (Weekday × Hour, UTC)"
-        subtitle="Average PnL per trade in each time bucket. Blue = positive, Red = negative. Intensity = magnitude."
-      >
-        {sample.length === 0 ? (
-          <div className="h-[240px] flex items-center justify-center text-sm text-zinc-500">No trades for current filters.</div>
-        ) : (
-          <Heatmap heat={heat} />
-        )}
-      </Card>
+      
     </div>
   );
 }
@@ -615,7 +554,7 @@ function Heatmap({ heat }) {
     <div className="space-y-3">
       <div className="flex items-center justify-between gap-4">
         <div className="text-xs text-zinc-500">
-          Scale uses max |avg| in visible cells:{" "}
+        
           <span className="font-semibold text-zinc-200 tabular-nums">${fmtMoney(maxAbs)}</span>
         </div>
         <div className="flex items-center gap-2 text-xs text-zinc-500">
