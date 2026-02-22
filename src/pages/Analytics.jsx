@@ -4,213 +4,210 @@ import { useSearchParams } from "react-router-dom";
 import { supabase } from "../lib/supabase";
 import {
   ResponsiveContainer,
-  BarChart,
-  Bar,
+  AreaChart,
+  Area,
   LineChart,
   Line,
+  BarChart,
+  Bar,
+  CartesianGrid,
   XAxis,
   YAxis,
   Tooltip,
-  CartesianGrid,
   ReferenceLine,
 } from "recharts";
 
-/** ---------- Theme (charcoal + semantic PnL colors) ---------- **/
-const POS = "#2B4A6F"; // charcoal blue
-const NEG = "#6B2B2B"; // charcoal red
+/**
+ * NOTE:
+ * - This page intentionally avoids refactoring auth or schema.
+ * - Uses existing trades table + existing logic.
+ * - "Expectancy" in this implementation is mean PnL per trade (avg PnL),
+ *   and the rolling chart is rolling mean PnL over the last N trades.
+ */
+
+// ---- Constants / Helpers ----------------------------------------------------
 
 const CHART = {
-  grid: "#27272a", // zinc-800-ish
-  axis: "#a1a1aa", // zinc-400
-  label: "#e4e4e7", // zinc-200
-  tooltipBg: "#09090b", // zinc-950
-  tooltipBorder: "#27272a",
-  pos: POS,
-  neg: NEG,
-  neutral: "#71717a", // zinc-500
-  zero: "#3f3f46", // zinc-700
+  grid: "#1f2937",
+  axis: "#a1a1aa",
+  zero: "#3f3f46",
+  pos: "#1e3a8a", // charcoal blue
+  neg: "#7f1d1d", // charcoal red
 };
 
+function clamp(n, lo, hi) {
+  return Math.max(lo, Math.min(hi, n));
+}
+
 function fmtMoney(n) {
-  const v = Number(n || 0);
-  return v.toLocaleString(undefined, {
-    minimumFractionDigits: 2,
-    maximumFractionDigits: 2,
-  });
-}
-
-function dayKey(isoTs) {
-  // YYYY-MM-DD in UTC (stable across devices/hosting)
-  return new Date(isoTs).toISOString().slice(0, 10);
-}
-
-function weekdayShortUTC(isoTs) {
-  const d = new Date(isoTs).getUTCDay(); // 0=Sun..6=Sat
-  return ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"][d];
+  const x = Number(n);
+  if (!Number.isFinite(x)) return "0.00";
+  return x.toFixed(2);
 }
 
 function pnlTextClass(v) {
-  if (v > 0) return "text-[color:var(--pos)]";
-  if (v < 0) return "text-[color:var(--neg)]";
-  return "text-zinc-400";
+  const x = Number(v) || 0;
+  if (x > 0) return "text-blue-300";
+  if (x < 0) return "text-red-300";
+  return "text-zinc-200";
 }
 
-/** ---------- URL-backed filters (host-safe) ---------- **/
-function useTradeFilters() {
-  const [searchParams, setSearchParams] = useSearchParams();
+function parseISODate(s) {
+  // Accept YYYY-MM-DD
+  if (!s) return null;
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(s).trim());
+  if (!m) return null;
+  const y = Number(m[1]);
+  const mo = Number(m[2]) - 1;
+  const d = Number(m[3]);
+  const dt = new Date(Date.UTC(y, mo, d, 0, 0, 0));
+  return Number.isNaN(dt.getTime()) ? null : dt;
+}
 
-  const filters = useMemo(() => {
-    return {
-      from: searchParams.get("from") || "", // YYYY-MM-DD
-      to: searchParams.get("to") || "", // YYYY-MM-DD
-      symbol: searchParams.get("symbol") || "",
-      asset: searchParams.get("asset") || "",
-      side: searchParams.get("side") || "",
-    };
-  }, [searchParams]);
+function toUTCDayKey(dt) {
+  // YYYY-MM-DD in UTC
+  const y = dt.getUTCFullYear();
+  const m = String(dt.getUTCMonth() + 1).padStart(2, "0");
+  const d = String(dt.getUTCDate()).padStart(2, "0");
+  return `${y}-${m}-${d}`;
+}
 
-  function setFilter(key, value) {
-    const next = new URLSearchParams(searchParams);
-    if (!value) next.delete(key);
-    else next.set(key, value);
-    setSearchParams(next, { replace: true });
+function weekdayNameUTC(dt) {
+  // 0=Sun..6=Sat
+  const idx = dt.getUTCDay();
+  return ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"][idx] || "NA";
+}
+
+function hourUTC(dt) {
+  return dt.getUTCHours();
+}
+
+function safeDate(dt) {
+  const t = dt?.getTime?.();
+  return Number.isFinite(t) ? dt : null;
+}
+
+// ---- Stats ---------------------------------------------------------------
+
+function computeStats(trades) {
+  const pnls = trades.map((t) => Number(t.pnl) || 0);
+
+  const total = pnls.reduce((a, b) => a + b, 0);
+
+  const wins = pnls.filter((p) => p > 0);
+  const losses = pnls.filter((p) => p < 0);
+  const breakeven = pnls.filter((p) => p === 0);
+
+  const winCount = wins.length;
+  const lossCount = losses.length;
+  const beCount = breakeven.length;
+  const n = pnls.length;
+
+  const grossWin = wins.reduce((a, b) => a + b, 0);
+  const grossLossAbs = Math.abs(losses.reduce((a, b) => a + b, 0)); // abs sum losses
+
+  const pf = grossLossAbs === 0 ? (grossWin > 0 ? Infinity : 0) : grossWin / grossLossAbs;
+
+  // "Expectancy" here = mean pnl per trade over the current filtered sample.
+  const expectancy = n ? total / n : 0;
+
+  // Max drawdown on cumulative equity curve
+  let peak = 0;
+  let eq = 0;
+  let maxDD = 0;
+  for (const p of pnls) {
+    eq += p;
+    if (eq > peak) peak = eq;
+    const dd = peak - eq;
+    if (dd > maxDD) maxDD = dd;
   }
 
-  function resetFilters() {
-    const next = new URLSearchParams(searchParams);
-    ["from", "to", "symbol", "asset", "side"].forEach((k) => next.delete(k));
-    setSearchParams(next, { replace: true });
+  const avgWin = winCount ? grossWin / winCount : 0;
+  const avgLossAbs = lossCount ? Math.abs(losses.reduce((a, b) => a + b, 0)) / lossCount : 0;
+
+  const winRate = n ? winCount / n : 0;
+
+  return {
+    n,
+    total,
+    winCount,
+    lossCount,
+    beCount,
+    winRate,
+    grossWin,
+    grossLossAbs,
+    pf,
+    expectancy,
+    maxDD,
+    avgWin,
+    avgLossAbs,
+  };
+}
+
+function equitySeries(trades) {
+  // returns [{i, equity, equityPos, equityNeg}]
+  let eq = 0;
+  const out = [];
+  for (let i = 0; i < trades.length; i++) {
+    const p = Number(trades[i].pnl) || 0;
+    eq += p;
+    out.push({
+      i: i + 1,
+      equity: eq,
+      equityPos: eq >= 0 ? eq : null,
+      equityNeg: eq < 0 ? eq : null,
+    });
   }
-
-  return { filters, setFilter, resetFilters };
+  return out;
 }
 
-function TradeFiltersBar({ filters, setFilter, resetFilters }) {
-  const input =
-    "bg-zinc-950 border border-zinc-800 rounded-lg px-3 py-2 text-zinc-200 text-sm focus:outline-none focus:border-zinc-600";
-  const label = "text-[11px] uppercase tracking-wide text-zinc-500";
-
-  return (
-    <div className="rounded-xl border border-zinc-800 bg-zinc-900 p-4">
-      <div className="grid grid-cols-1 md:grid-cols-6 gap-3">
-        <div className="flex flex-col gap-1">
-          <span className={label}>From</span>
-          <input
-            className={input}
-            type="date"
-            value={filters.from}
-            onChange={(e) => setFilter("from", e.target.value)}
-          />
-        </div>
-
-        <div className="flex flex-col gap-1">
-          <span className={label}>To</span>
-          <input
-            className={input}
-            type="date"
-            value={filters.to}
-            onChange={(e) => setFilter("to", e.target.value)}
-          />
-        </div>
-
-        <div className="flex flex-col gap-1">
-          <span className={label}>Symbol</span>
-          <input
-            className={input}
-            placeholder="MNQ, NQ, AAPL..."
-            value={filters.symbol}
-            onChange={(e) => setFilter("symbol", e.target.value)}
-          />
-        </div>
-
-        <div className="flex flex-col gap-1">
-          <span className={label}>Market</span>
-          <select
-            className={input}
-            value={filters.asset}
-            onChange={(e) => setFilter("asset", e.target.value)}
-          >
-            <option value="">All</option>
-            <option value="futures">Futures</option>
-            <option value="options">Options</option>
-            <option value="stock">Stocks</option>
-            <option value="forex">Forex</option>
-            <option value="crypto">Crypto</option>
-          </select>
-        </div>
-
-        <div className="flex flex-col gap-1">
-          <span className={label}>Side</span>
-          <select
-            className={input}
-            value={filters.side}
-            onChange={(e) => setFilter("side", e.target.value)}
-          >
-            <option value="">All</option>
-            <option value="long">Long</option>
-            <option value="short">Short</option>
-          </select>
-        </div>
-
-        <div className="flex items-end">
-          <button
-            onClick={resetFilters}
-            className="w-full rounded-lg border border-zinc-800 bg-zinc-950 hover:bg-zinc-900 px-4 py-2 text-sm font-semibold text-zinc-200 transition-colors"
-            type="button"
-          >
-            Reset
-          </button>
-        </div>
-      </div>
-    </div>
-  );
-}
-
-/** ---------- Data transforms ---------- **/
-
-function groupByDay(trades) {
-  const map = new Map();
+function dailyPnL(trades) {
+  const map = new Map(); // dayKey -> pnl
   for (const t of trades) {
-    const d = dayKey(t.created_at);
-    map.set(d, (map.get(d) || 0) + (Number(t.pnl) || 0));
+    const dt = safeDate(new Date(t.entry_time || t.created_at || t.date || t.timestamp));
+    if (!dt) continue;
+    const key = toUTCDayKey(dt);
+    map.set(key, (map.get(key) || 0) + (Number(t.pnl) || 0));
   }
-  return Array.from(map.entries())
-    .map(([date, pnl]) => ({
-      date,
-      pnl: Number(pnl.toFixed(2)),
-      pnlPos: pnl > 0 ? Number(pnl.toFixed(2)) : 0,
-      pnlNeg: pnl < 0 ? Number(Math.abs(pnl).toFixed(2)) : 0,
-    }))
-    .sort((a, b) => new Date(a.date) - new Date(b.date));
+  const keys = Array.from(map.keys()).sort();
+  return keys.map((k, idx) => {
+    const v = map.get(k) || 0;
+    return {
+      i: idx + 1,
+      day: k,
+      pnl: v,
+      pnlPos: v >= 0 ? v : null,
+      pnlNeg: v < 0 ? v : null,
+    };
+  });
 }
 
 function avgByWeekday(trades) {
-  const map = new Map(); // weekday -> {sum, n}
+  const sums = new Map(); // weekday -> sum
+  const counts = new Map(); // weekday -> count
   for (const t of trades) {
-    const k = weekdayShortUTC(t.created_at);
-    const obj = map.get(k) || { sum: 0, n: 0 };
-    obj.sum += Number(t.pnl) || 0;
-    obj.n += 1;
-    map.set(k, obj);
+    const dt = safeDate(new Date(t.entry_time || t.created_at || t.date || t.timestamp));
+    if (!dt) continue;
+    const wd = weekdayNameUTC(dt);
+    sums.set(wd, (sums.get(wd) || 0) + (Number(t.pnl) || 0));
+    counts.set(wd, (counts.get(wd) || 0) + 1);
   }
-
   const order = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
-  return order
-    .filter((k) => map.has(k))
-    .map((k) => {
-      const { sum, n } = map.get(k);
-      const avg = n ? sum / n : 0;
-      return {
-        day: k,
-        avg: Number(avg.toFixed(2)),
-        avgPos: avg > 0 ? Number(avg.toFixed(2)) : 0,
-        avgNeg: avg < 0 ? Number(Math.abs(avg).toFixed(2)) : 0,
-        n,
-      };
-    });
+  return order.map((wd) => {
+    const c = counts.get(wd) || 0;
+    const s = sums.get(wd) || 0;
+    const v = c ? s / c : 0;
+    return {
+      wd,
+      avg: v,
+      avgPos: v >= 0 ? v : null,
+      avgNeg: v < 0 ? v : null,
+      n: c,
+    };
+  });
 }
 
-function rollingExpectancy(trades, window = 20) {
+function rollingExpectancy(trades, window = 30) {
   if (!trades.length) return [];
 
   const out = [];
@@ -229,285 +226,240 @@ function rollingExpectancy(trades, window = 20) {
 
     out.push({
       i: i + 1,
-      exp: Number(exp.toFixed(2)),
-      expPos: exp > 0 ? Number(exp.toFixed(2)) : null,
-      expNeg: exp < 0 ? Number(exp.toFixed(2)) : null, // negative values for red line
+      exp,
+      expPos: exp >= 0 ? exp : null,
+      expNeg: exp < 0 ? exp : null,
     });
   }
+
   return out;
 }
 
-// For Max Drawdown tile only (not chart)
-function drawdownSeries(trades) {
-  let bal = 0;
-  let peak = 0;
-  const out = [];
-  for (let i = 0; i < trades.length; i++) {
-    bal += Number(trades[i].pnl) || 0;
-    if (bal > peak) peak = bal;
-    out.push({ i: i + 1, dd: Number((peak - bal).toFixed(2)) });
-  }
-  return out;
-}
-
-/** ---------- PnL Heatmap (weekday x hour) ---------- **/
 function buildPnLHeatmap(trades) {
-  const days = ["Mon", "Tue", "Wed", "Thu", "Fri"];
-  const hours = Array.from({ length: 24 }, (_, i) => i); // 0..23
+  // avg pnl per trade by weekday x hour (UTC)
+  // data: rows (weekday) with 24 hours
+  const weekdays = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
 
-  const agg = new Map(); // `${day}|${hour}` -> {sum,n}
+  const sums = new Map(); // key = wd|h -> sum
+  const counts = new Map(); // key = wd|h -> count
 
   for (const t of trades) {
-    const pnl = Number(t.pnl) || 0;
-    const dt = new Date(t.created_at);
-
-    const dayIdxUTC = dt.getUTCDay(); // 0 Sun .. 6 Sat
-    const hourUTC = dt.getUTCHours();
-
-    const day =
-      dayIdxUTC === 1
-        ? "Mon"
-        : dayIdxUTC === 2
-        ? "Tue"
-        : dayIdxUTC === 3
-        ? "Wed"
-        : dayIdxUTC === 4
-        ? "Thu"
-        : dayIdxUTC === 5
-        ? "Fri"
-        : null;
-
-    if (!day) continue;
-
-    const key = `${day}|${hourUTC}`;
-    const obj = agg.get(key) || { sum: 0, n: 0 };
-    obj.sum += pnl;
-    obj.n += 1;
-    agg.set(key, obj);
+    const dt = safeDate(new Date(t.entry_time || t.created_at || t.date || t.timestamp));
+    if (!dt) continue;
+    const wd = weekdayNameUTC(dt);
+    const h = hourUTC(dt);
+    const key = `${wd}|${h}`;
+    sums.set(key, (sums.get(key) || 0) + (Number(t.pnl) || 0));
+    counts.set(key, (counts.get(key) || 0) + 1);
   }
 
-  const cellMap = new Map();
   let maxAbs = 0;
-
-  for (const day of days) {
-    for (const hour of hours) {
-      const key = `${day}|${hour}`;
-      const obj = agg.get(key) || { sum: 0, n: 0 };
-      const avg = obj.n ? obj.sum / obj.n : 0;
-
+  const rows = weekdays.map((wd) => {
+    const hours = Array.from({ length: 24 }, (_, h) => {
+      const key = `${wd}|${h}`;
+      const c = counts.get(key) || 0;
+      const s = sums.get(key) || 0;
+      const avg = c ? s / c : 0;
       maxAbs = Math.max(maxAbs, Math.abs(avg));
+      return { h, avg, n: c };
+    });
+    return { wd, hours };
+  });
 
-      cellMap.set(key, {
-        day,
-        hour,
-        n: obj.n,
-        avg: Number(avg.toFixed(2)),
-      });
-    }
-  }
-
-  return { days, hours, cellMap, maxAbs: Number(maxAbs.toFixed(2)) };
+  return { rows, maxAbs };
 }
 
-function heatColor(avg, maxAbs) {
-  if (!maxAbs || maxAbs <= 0) return "transparent";
+// ---- UI Components ---------------------------------------------------------
 
-  const a = Math.min(1, Math.max(0, Math.abs(avg) / maxAbs));
-  const base = avg > 0 ? POS : avg < 0 ? NEG : null;
-  if (!base) return "transparent";
-
-  const r = parseInt(base.slice(1, 3), 16);
-  const g = parseInt(base.slice(3, 5), 16);
-  const b = parseInt(base.slice(5, 7), 16);
-
-  const alpha = 0.15 + 0.65 * a; // 0.15..0.80
-  return `rgba(${r}, ${g}, ${b}, ${alpha})`;
-}
-
-function hourLabel(h) {
-  return String(h).padStart(2, "0") + ":00";
-}
-
-/** ---------- Stats ---------- **/
-function computeStats(trades) {
-  const pnls = trades.map((t) => Number(t.pnl) || 0);
-  const count = pnls.length;
-
-  const total = pnls.reduce((a, b) => a + b, 0);
-
-  const wins = pnls.filter((p) => p > 0);
-  const losses = pnls.filter((p) => p < 0);
-
-  const grossWin = wins.reduce((a, b) => a + b, 0);
-  const grossLossAbs = Math.abs(losses.reduce((a, b) => a + b, 0));
-
-  const winRate = count ? (wins.length / count) * 100 : 0;
-  const avg = count ? total / count : 0;
-
-  const pf =
-    grossLossAbs === 0 ? (grossWin > 0 ? Infinity : 0) : grossWin / grossLossAbs;
-
-  const expectancy = avg;
-
-  const dd = drawdownSeries(trades);
-  const maxDD = dd.length ? Math.max(...dd.map((x) => x.dd)) : 0;
-
-  return {
-    count,
-    total: Number(total.toFixed(2)),
-    winRate: Number(winRate.toFixed(1)),
-    pf: pf === Infinity ? Infinity : Number(pf.toFixed(2)),
-    expectancy: Number(expectancy.toFixed(2)),
-    maxDD: Number(maxDD.toFixed(2)),
-  };
-}
-
-/** ---------- Tooltip (dark) ---------- **/
-function DarkTooltip({ active, payload, label, formatterLabel }) {
-  if (!active || !payload || payload.length === 0) return null;
-
+function Card({ title, subtitle, children }) {
   return (
-    <div
-      className="px-3 py-2 rounded-md text-xs"
-      style={{
-        background: CHART.tooltipBg,
-        border: `1px solid ${CHART.tooltipBorder}`,
-        color: CHART.label,
-      }}
-    >
-      <div style={{ color: CHART.axis }}>
-        {formatterLabel ? formatterLabel(label, payload) : label}
-      </div>
-      <div className="mt-1 space-y-1">
-        {payload
-          .filter((p) => p.dataKey && p.value != null && p.value !== 0)
-          .map((p) => (
-            <div key={p.dataKey} className="flex items-center justify-between gap-6">
-              <span style={{ color: CHART.axis }}>{p.name || p.dataKey}</span>
-              <span className="font-semibold tabular-nums">
-                {typeof p.value === "number" ? `$${fmtMoney(p.value)}` : String(p.value)}
-              </span>
-            </div>
-          ))}
-      </div>
-    </div>
-  );
-}
-
-/** ---------- UI ---------- **/
-function StatTile({ label, value, valueClass = "text-zinc-200", sub }) {
-  return (
-    <div className="rounded-xl border border-zinc-800 bg-zinc-900 p-4">
-      <div className="text-[11px] uppercase tracking-wide text-zinc-500">{label}</div>
-      <div className={`mt-2 text-xl font-semibold tabular-nums ${valueClass}`}>{value}</div>
-      {sub ? <div className="mt-1 text-xs text-zinc-500">{sub}</div> : null}
-    </div>
-  );
-}
-
-function Card({ title, children, subtitle }) {
-  return (
-    <div className="rounded-xl border border-zinc-800 bg-zinc-900 p-5">
+    <div className="rounded-2xl bg-zinc-950/60 border border-zinc-800 p-4 shadow-sm">
       <div className="mb-3">
-        <div className="text-sm font-semibold text-zinc-200">{title}</div>
-        {subtitle ? <div className="text-xs text-zinc-500 mt-1">{subtitle}</div> : null}
+        <div className="text-base font-semibold text-zinc-100">{title}</div>
+        {subtitle ? <div className="text-xs text-zinc-500 mt-0.5">{subtitle}</div> : null}
       </div>
       {children}
     </div>
   );
 }
 
-/** ---------- Page ---------- **/
-export default function Analytics() {
-  const [trades, setTrades] = useState([]);
-  const [loading, setLoading] = useState(true);
+function StatTile({ label, value, sub, valueClass = "text-zinc-100" }) {
+  return (
+    <div className="rounded-2xl bg-zinc-950/40 border border-zinc-800 p-3">
+      <div className="text-xs text-zinc-500">{label}</div>
+      <div className={`text-lg font-semibold tabular-nums mt-1 ${valueClass}`}>{value}</div>
+      {sub ? <div className="text-[11px] text-zinc-600 mt-1">{sub}</div> : null}
+    </div>
+  );
+}
 
-  const { filters, setFilter, resetFilters } = useTradeFilters();
+function DarkTooltip({ active, payload, label }) {
+  if (!active || !payload || !payload.length) return null;
+  const p = payload[0]?.value;
+  const v = Number(p);
+  return (
+    <div className="rounded-xl border border-zinc-800 bg-zinc-950/95 px-3 py-2 shadow-lg">
+      <div className="text-[11px] text-zinc-500 mb-1">#{label}</div>
+      <div className={`text-sm font-semibold tabular-nums ${pnlTextClass(v)}`}>${fmtMoney(v)}</div>
+    </div>
+  );
+}
+
+function SectionHeader({ title, right }) {
+  return (
+    <div className="flex items-center justify-between gap-3 mb-2">
+      <div className="text-sm font-semibold text-zinc-100">{title}</div>
+      {right ? <div className="text-xs text-zinc-500">{right}</div> : null}
+    </div>
+  );
+}
+
+function FilterPill({ label, value }) {
+  return (
+    <div className="px-2 py-1 rounded-full border border-zinc-800 bg-zinc-950/40 text-xs text-zinc-400">
+      <span className="text-zinc-500">{label}: </span>
+      <span className="text-zinc-200">{value}</span>
+    </div>
+  );
+}
+
+// ---- Main Page -------------------------------------------------------------
+
+export default function Analytics() {
+  const [searchParams] = useSearchParams();
+  const [loading, setLoading] = useState(true);
+  const [trades, setTrades] = useState([]);
+
+  // URL filters (as per thread-state export)
+  const from = searchParams.get("from") || "";
+  const to = searchParams.get("to") || "";
+  const symbol = searchParams.get("symbol") || "";
+  const asset = searchParams.get("asset") || "";
+  const side = searchParams.get("side") || "";
 
   useEffect(() => {
+    let alive = true;
+
     async function load() {
-      // Host-safe: same behavior local or deployed. RLS must enforce user scope.
+      setLoading(true);
       const { data, error } = await supabase
         .from("trades")
         .select("*")
-        .order("created_at", { ascending: true });
+        .order("entry_time", { ascending: true });
 
-      if (error) console.error(error);
+      if (!alive) return;
+
+      if (error) {
+        console.error("Analytics trades load error:", error);
+        setTrades([]);
+        setLoading(false);
+        return;
+      }
 
       setTrades(data || []);
       setLoading(false);
     }
+
     load();
+    return () => {
+      alive = false;
+    };
   }, []);
 
-  // Filter sample (client-side, zero schema/auth changes)
   const sample = useMemo(() => {
-    const sym = (filters.symbol || "").trim().toUpperCase();
+    let out = [...trades];
 
-    // UTC boundaries so your filter behaves consistently on any device.
-    const fromTs = filters.from ? Date.parse(`${filters.from}T00:00:00.000Z`) : null;
-    const toTs = filters.to ? Date.parse(`${filters.to}T23:59:59.999Z`) : null;
+    // Filter by date range if provided (assumes entry_time is ISO or timestamp)
+    const fromDt = parseISODate(from);
+    const toDt = parseISODate(to);
 
-    return trades.filter((t) => {
-      const ts = Date.parse(t.created_at);
+    if (fromDt) {
+      out = out.filter((t) => {
+        const dt = safeDate(new Date(t.entry_time || t.created_at || t.date || t.timestamp));
+        return dt ? dt.getTime() >= fromDt.getTime() : false;
+      });
+    }
 
-      if (fromTs != null && ts < fromTs) return false;
-      if (toTs != null && ts > toTs) return false;
+    if (toDt) {
+      // inclusive to end of day UTC
+      const end = new Date(toDt.getTime() + 24 * 60 * 60 * 1000 - 1);
+      out = out.filter((t) => {
+        const dt = safeDate(new Date(t.entry_time || t.created_at || t.date || t.timestamp));
+        return dt ? dt.getTime() <= end.getTime() : false;
+      });
+    }
 
-      if (sym) {
-        const tSym = String(t.symbol || "").toUpperCase();
-        if (!tSym.includes(sym)) return false;
-      }
+    if (symbol) {
+      const s = symbol.trim().toLowerCase();
+      out = out.filter((t) => String(t.symbol || "").toLowerCase() === s);
+    }
 
-      if (filters.asset && t.asset_type !== filters.asset) return false;
+    if (asset) {
+      const a = asset.trim().toLowerCase();
+      out = out.filter((t) => String(t.asset || "").toLowerCase() === a);
+    }
 
-      if (filters.side) {
-        const side = t.side || t.direction; // tolerate either
-        if (side !== filters.side) return false;
-      }
+    if (side) {
+      const sd = side.trim().toLowerCase();
+      out = out.filter((t) => String(t.side || "").toLowerCase() === sd);
+    }
 
-      return true;
+    // Ensure stable chronological order for equity + rolling
+    out.sort((a, b) => {
+      const da = new Date(a.entry_time || a.created_at || a.date || a.timestamp).getTime();
+      const db = new Date(b.entry_time || b.created_at || b.date || b.timestamp).getTime();
+      return da - db;
     });
-  }, [trades, filters]);
 
-  // All analytics run off the filtered sample
-  const daily = useMemo(() => groupByDay(sample), [sample]);
+    return out;
+  }, [trades, from, to, symbol, asset, side]);
+
+  const equity = useMemo(() => equitySeries(sample), [sample]);
+  const daily = useMemo(() => dailyPnL(sample), [sample]);
   const weekdayAvg = useMemo(() => avgByWeekday(sample), [sample]);
-  const rollExp = useMemo(() => rollingExpectancy(sample, 20), [sample]);
+  const rollExp = useMemo(() => rollingExpectancy(sample, 30), [sample]);
   const heat = useMemo(() => buildPnLHeatmap(sample), [sample]);
   const stats = useMemo(() => computeStats(sample), [sample]);
 
-  if (loading) return <div className="p-6 text-zinc-300">Loading...</div>;
+  if (loading) return <div className="p-6 text-sm text-zinc-400">Loading analytics…</div>;
 
   return (
-    <div style={{ "--pos": POS, "--neg": NEG }} className="space-y-6 p-6">
-      <div className="flex items-end justify-between">
-        <h1 className="text-xl font-semibold text-zinc-100">Analytics</h1>
-        <div className="text-xs text-zinc-500">
-          Positive = <span className="font-semibold text-[color:var(--pos)]">charcoal blue</span> •
-          Negative = <span className="font-semibold text-[color:var(--neg)]">charcoal red</span>
+    <div className="p-5 space-y-5">
+      <div className="flex flex-wrap items-end justify-between gap-3">
+        <div>
+          <div className="text-xl font-semibold text-zinc-100">Analytics</div>
+          <div className="text-xs text-zinc-500 mt-1">
+            Filters via URL: <span className="text-zinc-300">from</span>, <span className="text-zinc-300">to</span>,{" "}
+            <span className="text-zinc-300">symbol</span>, <span className="text-zinc-300">asset</span>,{" "}
+            <span className="text-zinc-300">side</span>
+          </div>
+        </div>
+
+        <div className="flex flex-wrap items-center gap-2">
+          {from ? <FilterPill label="from" value={from} /> : null}
+          {to ? <FilterPill label="to" value={to} /> : null}
+          {symbol ? <FilterPill label="symbol" value={symbol} /> : null}
+          {asset ? <FilterPill label="asset" value={asset} /> : null}
+          {side ? <FilterPill label="side" value={side} /> : null}
+          <FilterPill label="trades" value={String(stats.n)} />
         </div>
       </div>
 
-      {/* Filters (URL-backed) */}
-      <TradeFiltersBar filters={filters} setFilter={setFilter} resetFilters={resetFilters} />
-
-      {/* Top Stat Tiles */}
-      <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-6 gap-3">
-        <StatTile label="Trades" value={`${stats.count}`} />
+      {/* Top Stats */}
+      <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-3">
         <StatTile
           label="Total PnL"
           value={`$${fmtMoney(stats.total)}`}
           valueClass={pnlTextClass(stats.total)}
+          sub="sum pnl over filtered sample"
         />
-        <StatTile label="Win Rate" value={`${stats.winRate}%`} />
         <StatTile
           label="Profit Factor"
           value={stats.pf === Infinity ? "∞" : String(stats.pf)}
           sub="gross wins / abs(gross losses)"
         />
         <StatTile
-          label="Expectancy"
+          label="Avg PnL / Trade (Expectancy)"
           value={`$${fmtMoney(stats.expectancy)}`}
           valueClass={pnlTextClass(stats.expectancy)}
           sub="mean pnl per trade"
@@ -515,64 +467,101 @@ export default function Analytics() {
         <StatTile
           label="Max Drawdown"
           value={`$${fmtMoney(stats.maxDD)}`}
-          valueClass="text-zinc-200"
-          sub="from equity curve (start=0)"
+          valueClass={pnlTextClass(-stats.maxDD)}
+          sub="peak-to-trough equity drawdown"
         />
       </div>
 
+      {/* Equity Curve */}
+      <Card title="Equity Curve" subtitle="Cumulative PnL over time (filtered sample).">
+        <div className="h-[280px]">
+          {equity.length === 0 ? (
+            <div className="h-full flex items-center justify-center text-sm text-zinc-500">No trades for current filters.</div>
+          ) : (
+            <ResponsiveContainer>
+              <AreaChart data={equity}>
+                <CartesianGrid stroke={CHART.grid} strokeDasharray="3 3" />
+                <XAxis dataKey="i" tick={{ fill: CHART.axis, fontSize: 11 }} />
+                <YAxis tick={{ fill: CHART.axis, fontSize: 11 }} />
+                <Tooltip content={<DarkTooltip />} cursor={{ fill: "transparent" }} />
+                <ReferenceLine y={0} stroke={CHART.zero} />
+                <Area
+                  type="monotone"
+                  dataKey="equityPos"
+                  name="Equity +"
+                  stroke={CHART.pos}
+                  fill={CHART.pos}
+                  fillOpacity={0.15}
+                  strokeWidth={2}
+                  connectNulls={false}
+                />
+                <Area
+                  type="monotone"
+                  dataKey="equityNeg"
+                  name="Equity -"
+                  stroke={CHART.neg}
+                  fill={CHART.neg}
+                  fillOpacity={0.15}
+                  strokeWidth={2}
+                  connectNulls={false}
+                />
+              </AreaChart>
+            </ResponsiveContainer>
+          )}
+        </div>
+      </Card>
+
       {/* Daily PnL */}
-      <Card
-        title="Daily PnL"
-        subtitle="Sum of trade PnL grouped by day (UTC). Hover highlight is disabled."
-      >
+      <Card title="Daily PnL" subtitle="Sum of PnL per UTC day.">
         <div className="h-[280px]">
           {daily.length === 0 ? (
-            <div className="h-full flex items-center justify-center text-sm text-zinc-500">
-              No trades for current filters.
-            </div>
+            <div className="h-full flex items-center justify-center text-sm text-zinc-500">No trades for current filters.</div>
           ) : (
             <ResponsiveContainer>
               <BarChart data={daily}>
                 <CartesianGrid stroke={CHART.grid} strokeDasharray="3 3" />
-                <XAxis dataKey="date" tick={{ fill: CHART.axis, fontSize: 11 }} />
+                <XAxis dataKey="day" tick={{ fill: CHART.axis, fontSize: 11 }} minTickGap={18} />
                 <YAxis tick={{ fill: CHART.axis, fontSize: 11 }} />
                 <Tooltip content={<DarkTooltip />} cursor={{ fill: "transparent" }} />
                 <ReferenceLine y={0} stroke={CHART.zero} />
-                <Bar dataKey="pnlPos" name="PnL +" fill={CHART.pos} radius={[4, 4, 0, 0]} />
-                <Bar dataKey="pnlNeg" name="PnL -" fill={CHART.neg} radius={[4, 4, 0, 0]} />
+                <Bar dataKey="pnlPos" name="PnL +" fill={CHART.pos} radius={[6, 6, 0, 0]} />
+                <Bar dataKey="pnlNeg" name="PnL -" fill={CHART.neg} radius={[6, 6, 0, 0]} />
               </BarChart>
             </ResponsiveContainer>
           )}
         </div>
       </Card>
 
-      {/* Avg PnL by Weekday */}
-      <Card title="Average PnL by Day of Week" subtitle="Mean PnL per trade grouped by weekday.">
+      {/* Weekday Average */}
+      <Card title="Weekday Avg PnL" subtitle="Average PnL per trade by weekday (UTC).">
         <div className="h-[280px]">
           {weekdayAvg.length === 0 ? (
-            <div className="h-full flex items-center justify-center text-sm text-zinc-500">
-              No trades for current filters.
-            </div>
+            <div className="h-full flex items-center justify-center text-sm text-zinc-500">No trades for current filters.</div>
           ) : (
             <ResponsiveContainer>
               <BarChart data={weekdayAvg}>
                 <CartesianGrid stroke={CHART.grid} strokeDasharray="3 3" />
-                <XAxis dataKey="day" tick={{ fill: CHART.axis, fontSize: 11 }} />
+                <XAxis dataKey="wd" tick={{ fill: CHART.axis, fontSize: 11 }} />
                 <YAxis tick={{ fill: CHART.axis, fontSize: 11 }} />
                 <Tooltip
+                  content={({ active, payload, label }) => {
+                    if (!active || !payload || !payload.length) return null;
+                    const v = Number(payload[0]?.value);
+                    const n = weekdayAvg.find((x) => x.wd === label)?.n || 0;
+                    return (
+                      <div className="rounded-xl border border-zinc-800 bg-zinc-950/95 px-3 py-2 shadow-lg">
+                        <div className="text-[11px] text-zinc-500 mb-1">
+                          {label} • n={n}
+                        </div>
+                        <div className={`text-sm font-semibold tabular-nums ${pnlTextClass(v)}`}>${fmtMoney(v)}</div>
+                      </div>
+                    );
+                  }}
                   cursor={{ fill: "transparent" }}
-                  content={
-                    <DarkTooltip
-                      formatterLabel={(label, payload) => {
-                        const p = payload?.[0]?.payload;
-                        return p ? `${label} • n=${p.n}` : label;
-                      }}
-                    />
-                  }
                 />
                 <ReferenceLine y={0} stroke={CHART.zero} />
-                <Bar dataKey="avgPos" name="Avg +" fill={CHART.pos} radius={[4, 4, 0, 0]} />
-                <Bar dataKey="avgNeg" name="Avg -" fill={CHART.neg} radius={[4, 4, 0, 0]} />
+                <Bar dataKey="avgPos" name="Avg +" fill={CHART.pos} radius={[6, 6, 0, 0]} />
+                <Bar dataKey="avgNeg" name="Avg -" fill={CHART.neg} radius={[6, 6, 0, 0]} />
               </BarChart>
             </ResponsiveContainer>
           )}
@@ -580,15 +569,10 @@ export default function Analytics() {
       </Card>
 
       {/* Rolling Expectancy */}
-      <Card
-        title="Rolling Expectancy (20-trade window)"
-        subtitle="Edge stability monitor: rolling mean PnL over the last 20 trades."
-      >
+      <Card title="Rolling 30-Trade Avg PnL (Expectancy)" subtitle="Edge stability monitor: rolling mean PnL over the last 30 trades.">
         <div className="h-[280px]">
           {rollExp.length === 0 ? (
-            <div className="h-full flex items-center justify-center text-sm text-zinc-500">
-              No trades for current filters.
-            </div>
+            <div className="h-full flex items-center justify-center text-sm text-zinc-500">No trades for current filters.</div>
           ) : (
             <ResponsiveContainer>
               <LineChart data={rollExp}>
@@ -597,24 +581,8 @@ export default function Analytics() {
                 <YAxis tick={{ fill: CHART.axis, fontSize: 11 }} />
                 <Tooltip content={<DarkTooltip />} cursor={{ fill: "transparent" }} />
                 <ReferenceLine y={0} stroke={CHART.zero} />
-                <Line
-                  type="monotone"
-                  dataKey="expPos"
-                  name="Expectancy +"
-                  stroke={CHART.pos}
-                  strokeWidth={2}
-                  dot={false}
-                  connectNulls={false}
-                />
-                <Line
-                  type="monotone"
-                  dataKey="expNeg"
-                  name="Expectancy -"
-                  stroke={CHART.neg}
-                  strokeWidth={2}
-                  dot={false}
-                  connectNulls={false}
-                />
+                <Line type="monotone" dataKey="expPos" name="Avg PnL +" stroke={CHART.pos} strokeWidth={2} dot={false} connectNulls={false} />
+                <Line type="monotone" dataKey="expNeg" name="Avg PnL -" stroke={CHART.neg} strokeWidth={2} dot={false} connectNulls={false} />
               </LineChart>
             </ResponsiveContainer>
           )}
@@ -627,96 +595,93 @@ export default function Analytics() {
         subtitle="Average PnL per trade in each time bucket. Blue = positive, Red = negative. Intensity = magnitude."
       >
         {sample.length === 0 ? (
-          <div className="h-[240px] flex items-center justify-center text-sm text-zinc-500">
-            No trades for current filters.
-          </div>
+          <div className="h-[240px] flex items-center justify-center text-sm text-zinc-500">No trades for current filters.</div>
         ) : (
-          <div className="space-y-3">
-            <div className="flex items-center justify-between gap-4">
-              <div className="text-xs text-zinc-500">
-                Scale uses max |avg| in visible cells:{" "}
-                <span className="font-semibold text-zinc-200 tabular-nums">${fmtMoney(heat.maxAbs)}</span>
-              </div>
-              <div className="flex items-center gap-2 text-xs text-zinc-500">
-                <span className="tabular-nums">0</span>
-                <div className="h-2 w-28 rounded-full overflow-hidden border border-zinc-800">
-                  <div
-                    className="h-full w-1/2 inline-block"
-                    style={{
-                      background:
-                        "linear-gradient(to right, rgba(43,74,111,0.15), rgba(43,74,111,0.80))",
-                    }}
-                  />
-                  <div
-                    className="h-full w-1/2 inline-block"
-                    style={{
-                      background:
-                        "linear-gradient(to right, rgba(107,43,43,0.15), rgba(107,43,43,0.80))",
-                    }}
-                  />
-                </div>
-                <span className="tabular-nums">max</span>
-              </div>
-            </div>
-
-            <div className="overflow-x-auto">
-              <div className="min-w-[980px]">
-                <div className="grid" style={{ gridTemplateColumns: `80px repeat(24, 1fr)` }}>
-                  <div className="text-[11px] text-zinc-500 px-2 py-1">UTC</div>
-                  {heat.hours.map((h) => (
-                    <div
-                      key={h}
-                      className="text-[10px] text-zinc-500 px-1 py-1 text-center tabular-nums"
-                    >
-                      {String(h).padStart(2, "0")}
-                    </div>
-                  ))}
-                </div>
-
-                {heat.days.map((day) => (
-                  <div
-                    key={day}
-                    className="grid items-stretch"
-                    style={{ gridTemplateColumns: `80px repeat(24, 1fr)` }}
-                  >
-                    <div className="text-xs text-zinc-300 px-2 py-2 font-semibold">{day}</div>
-
-                    {heat.hours.map((hour) => {
-                      const key = `${day}|${hour}`;
-                      const cell = heat.cellMap.get(key);
-                      const avg = cell?.avg ?? 0;
-                      const n = cell?.n ?? 0;
-
-                      const bg = heatColor(avg, heat.maxAbs);
-                      const title =
-                        `${day} ${hourLabel(hour)} (UTC)\n` + `avg: $${fmtMoney(avg)}\n` + `n: ${n}`;
-
-                      return (
-                        <div
-                          key={key}
-                          title={title}
-                          className="h-9 border border-zinc-800/70 rounded-md m-[2px] flex items-center justify-center"
-                          style={{ backgroundColor: bg }}
-                        >
-                          <span className={`text-[11px] font-semibold tabular-nums ${pnlTextClass(avg)}`}>
-                            {n ? fmtMoney(avg) : ""}
-                          </span>
-                        </div>
-                      );
-                    })}
-                  </div>
-                ))}
-              </div>
-            </div>
-
-            <div className="text-xs text-zinc-500">
-              Note: bins use <span className="font-semibold text-zinc-300">created_at</span> in{" "}
-              <span className="font-semibold text-zinc-300">UTC</span>. If you want CME/NYSE local session time,
-              we’ll add a selectable timezone mode next.
-            </div>
-          </div>
+          <Heatmap heat={heat} />
         )}
       </Card>
+    </div>
+  );
+}
+
+function Heatmap({ heat }) {
+  const { rows, maxAbs } = heat;
+  const scale = (v) => {
+    if (!maxAbs) return 0;
+    return clamp(Math.abs(v) / maxAbs, 0, 1);
+  };
+
+  return (
+    <div className="space-y-3">
+      <div className="flex items-center justify-between gap-4">
+        <div className="text-xs text-zinc-500">
+          Scale uses max |avg| in visible cells:{" "}
+          <span className="font-semibold text-zinc-200 tabular-nums">${fmtMoney(maxAbs)}</span>
+        </div>
+        <div className="flex items-center gap-2 text-xs text-zinc-500">
+          <span className="tabular-nums">0</span>
+          <div className="h-2 w-28 rounded-full overflow-hidden border border-zinc-800">
+            <div
+              className="h-full w-1/2 inline-block"
+              style={{
+                background: `linear-gradient(to right, ${CHART.pos}, ${CHART.pos})`,
+                opacity: 0.25,
+              }}
+            />
+            <div
+              className="h-full w-1/2 inline-block"
+              style={{
+                background: `linear-gradient(to right, ${CHART.neg}, ${CHART.neg})`,
+                opacity: 0.25,
+              }}
+            />
+          </div>
+          <span className="tabular-nums">{fmtMoney(maxAbs)}</span>
+        </div>
+      </div>
+
+      <div className="overflow-x-auto">
+        <div className="min-w-[880px]">
+          <div className="grid grid-cols-[80px_repeat(24,minmax(0,1fr))] gap-1 text-[11px] text-zinc-600 mb-2">
+            <div />
+            {Array.from({ length: 24 }, (_, h) => (
+              <div key={h} className="text-center tabular-nums">
+                {String(h).padStart(2, "0")}
+              </div>
+            ))}
+          </div>
+
+          <div className="space-y-1">
+            {rows.map((r) => (
+              <div key={r.wd} className="grid grid-cols-[80px_repeat(24,minmax(0,1fr))] gap-1">
+                <div className="text-[11px] text-zinc-500 flex items-center">{r.wd}</div>
+                {r.hours.map((cell) => {
+                  const a = cell.avg;
+                  const intensity = scale(a);
+                  const isPos = a >= 0;
+                  const bg = isPos ? CHART.pos : CHART.neg;
+
+                  return (
+                    <div
+                      key={cell.h}
+                      title={`${r.wd} ${String(cell.h).padStart(2, "0")}:00 • avg=$${fmtMoney(a)} • n=${cell.n}`}
+                      className="h-7 rounded-md border border-zinc-800"
+                      style={{
+                        backgroundColor: bg,
+                        opacity: cell.n ? 0.15 + 0.55 * intensity : 0.08,
+                      }}
+                    />
+                  );
+                })}
+              </div>
+            ))}
+          </div>
+
+          <div className="mt-2 text-[11px] text-zinc-600">
+            Tip: hover a cell for its avg PnL and sample size.
+          </div>
+        </div>
+      </div>
     </div>
   );
 }
