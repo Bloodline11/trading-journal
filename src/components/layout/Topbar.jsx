@@ -1,4 +1,4 @@
-import { useLocation } from "react-router-dom";
+import { useLocation, useNavigate } from "react-router-dom";
 import { supabase } from "../../lib/supabase";
 
 function titleFromPath(pathname) {
@@ -12,11 +12,14 @@ function titleFromPath(pathname) {
 
 export default function Topbar() {
   const { pathname } = useLocation();
+  const navigate = useNavigate();
   const title = titleFromPath(pathname);
 
   async function handleLogout() {
     await supabase.auth.signOut();
-    window.location.href = "/login";
+
+    // IMPORTANT: client-side navigation (no full reload)
+    navigate("/login", { replace: true });
   }
 
   return (
