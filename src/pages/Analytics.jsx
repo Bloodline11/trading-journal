@@ -98,7 +98,8 @@ function computeStats(trades) {
   const grossWin = wins.reduce((a, b) => a + b, 0);
   const grossLossAbs = Math.abs(losses.reduce((a, b) => a + b, 0));
 
-  const pf = grossLossAbs === 0 ? (grossWin > 0 ? Infinity : 0) : grossWin / grossLossAbs;
+  const pf =
+    grossLossAbs === 0 ? (grossWin > 0 ? Infinity : 0) : grossWin / grossLossAbs;
 
   const expectancy = n ? total / n : 0;
 
@@ -199,6 +200,63 @@ function rollingExpectancy(trades, window = 30) {
   return out;
 }
 
+// ---- Calendar Helpers ------------------------------------------------------
+
+function getMonthMatrix(year, month) {
+  // month: 0-11
+  const first = new Date(Date.UTC(year, month, 1));
+  const last = new Date(Date.UTC(year, month + 1, 0));
+
+  const startDay = first.getUTCDay(); // 0=Sun
+  const totalDays = last.getUTCDate();
+
+  const weeks = [];
+  let currentWeek = [];
+
+  // pad leading empty cells
+  for (let i = 0; i < startDay; i++) {
+    currentWeek.push(null);
+  }
+
+  for (let day = 1; day <= totalDays; day++) {
+    const dt = new Date(Date.UTC(year, month, day));
+    currentWeek.push(dt);
+
+    if (currentWeek.length === 7) {
+      weeks.push(currentWeek);
+      currentWeek = [];
+    }
+  }
+
+  // pad trailing
+  while (currentWeek.length && currentWeek.length < 7) {
+    currentWeek.push(null);
+  }
+
+  if (currentWeek.length) weeks.push(currentWeek);
+
+  return weeks;
+}
+
+function buildDailyMap(trades) {
+  const map = new Map(); // YYYY-MM-DD -> { pnl, count }
+
+  for (const t of trades) {
+    const dt = safeDate(new Date(tradeTime(t)));
+    if (!dt) continue;
+
+    const key = toUTCDayKey(dt);
+    const prev = map.get(key) || { pnl: 0, count: 0 };
+
+    map.set(key, {
+      pnl: prev.pnl + (Number(t.pnl) || 0),
+      count: prev.count + 1,
+    });
+  }
+
+  return map;
+}
+
 // ---- UI Components ---------------------------------------------------------
 
 function Card({ title, subtitle, children }) {
@@ -206,7 +264,9 @@ function Card({ title, subtitle, children }) {
     <div className="rounded-2xl bg-zinc-950/60 border border-zinc-800 p-4 shadow-sm">
       <div className="mb-3">
         <div className="text-base font-semibold text-zinc-100">{title}</div>
-        {subtitle ? <div className="text-xs text-zinc-500 mt-0.5">{subtitle}</div> : null}
+        {subtitle ? (
+          <div className="text-xs text-zinc-500 mt-0.5">{subtitle}</div>
+        ) : null}
       </div>
       {children}
     </div>
@@ -217,7 +277,9 @@ function StatTile({ label, value, sub, valueClass = "text-zinc-100" }) {
   return (
     <div className="rounded-2xl bg-zinc-950/40 border border-zinc-800 p-3">
       <div className="text-xs text-zinc-500">{label}</div>
-      <div className={`text-lg font-semibold tabular-nums mt-1 ${valueClass}`}>{value}</div>
+      <div className={`text-lg font-semibold tabular-nums mt-1 ${valueClass}`}>
+        {value}
+      </div>
       {sub ? <div className="text-[11px] text-zinc-600 mt-1">{sub}</div> : null}
     </div>
   );
@@ -230,7 +292,9 @@ function DarkTooltip({ active, payload, label }) {
   return (
     <div className="rounded-xl border border-zinc-800 bg-zinc-950/95 px-3 py-2 shadow-lg">
       <div className="text-[11px] text-zinc-500 mb-1">#{label}</div>
-      <div className={`text-sm font-semibold tabular-nums ${pnlTextClass(v)}`}>${fmtMoney(v)}</div>
+      <div className={`text-sm font-semibold tabular-nums ${pnlTextClass(v)}`}>
+        ${fmtMoney(v)}
+      </div>
     </div>
   );
 }
@@ -298,9 +362,12 @@ function PnLCalendar({ trades }) {
     <div className="space-y-3">
       <div className="flex items-center justify-between gap-3">
         <div>
-          <div className="text-sm font-semibold text-zinc-100">PnL Calendar</div>
-          <div className="text-xs text-zinc-500 mt-0.5">
+          <div className="text-xs text-zinc-500">
             Daily net PnL (UTC day derived from executed_at). Hover for details.
+          </div>
+          <div className="mt-1 text-[11px] text-zinc-600">
+            Trades in filtered sample:{" "}
+            <span className="text-zinc-200 tabular-nums">{trades.length}</span>
           </div>
         </div>
 
@@ -346,7 +413,12 @@ function PnLCalendar({ trades }) {
               <div key={wi} className="grid grid-cols-7 gap-2">
                 {w.map((dt, di) => {
                   if (!dt) {
-                    return <div key={di} className="h-20 rounded-xl border border-zinc-900 bg-zinc-950/20" />;
+                    return (
+                      <div
+                        key={di}
+                        className="h-20 rounded-xl border border-zinc-900 bg-zinc-950/20"
+                      />
+                    );
                   }
 
                   const key = toUTCDayKey(dt);
@@ -391,7 +463,7 @@ function PnLCalendar({ trades }) {
           </div>
 
           <div className="mt-2 text-[11px] text-zinc-600">
-            Cell color intensity scales to the max absolute daily PnL in the current filtered sample.
+            Intensity scales to max absolute daily PnL in the current filtered sample.
           </div>
         </div>
       </div>
@@ -517,7 +589,7 @@ export default function Analytics() {
   }, [trades, from, to, symbol, side]);
 
   const equity = useMemo(() => equitySeries(sample), [sample]);
-  const daily = useMemo(() => dailyPnL(sample), [sample]);
+  const daily = useMemo(() => dailyPnL(sample), [sample]); // kept for future charts / sanity checks
   const rollExp = useMemo(() => rollingExpectancy(sample, 30), [sample]);
   const stats = useMemo(() => computeStats(sample), [sample]);
 
@@ -556,6 +628,7 @@ export default function Analytics() {
           {symbol ? <FilterPill label="symbol" value={symbol} /> : null}
           {side ? <FilterPill label="side" value={side} /> : null}
           <FilterPill label="trades" value={String(stats.n)} />
+          {daily.length ? <FilterPill label="days" value={String(daily.length)} /> : null}
         </div>
       </div>
 
@@ -738,66 +811,10 @@ export default function Analytics() {
         </div>
       </Card>
 
-      {/* Daily PnL (used later for calendar too) */}
-      <Card title="PnL Calendar" subtitle="Daily net PnL calendar. Hover a day for details.">
-  <PnLCalendar trades={sample} />
-</Card>
+      {/* PnL Calendar */}
+      <Card title="PnL Calendar" subtitle="Full monthly calendar with daily net PnL.">
+        <PnLCalendar trades={sample} />
+      </Card>
     </div>
   );
-}
-// ---- Calendar Helpers ------------------------------------------------------
-
-function getMonthMatrix(year, month) {
-  // month: 0-11
-  const first = new Date(Date.UTC(year, month, 1));
-  const last = new Date(Date.UTC(year, month + 1, 0));
-
-  const startDay = first.getUTCDay(); // 0=Sun
-  const totalDays = last.getUTCDate();
-
-  const weeks = [];
-  let currentWeek = [];
-
-  // pad leading empty cells
-  for (let i = 0; i < startDay; i++) {
-    currentWeek.push(null);
-  }
-
-  for (let day = 1; day <= totalDays; day++) {
-    const dt = new Date(Date.UTC(year, month, day));
-    currentWeek.push(dt);
-
-    if (currentWeek.length === 7) {
-      weeks.push(currentWeek);
-      currentWeek = [];
-    }
-  }
-
-  // pad trailing
-  while (currentWeek.length && currentWeek.length < 7) {
-    currentWeek.push(null);
-  }
-
-  if (currentWeek.length) weeks.push(currentWeek);
-
-  return weeks;
-}
-
-function buildDailyMap(trades) {
-  const map = new Map(); // YYYY-MM-DD -> { pnl, count }
-
-  for (const t of trades) {
-    const dt = safeDate(new Date(tradeTime(t)));
-    if (!dt) continue;
-
-    const key = toUTCDayKey(dt);
-    const prev = map.get(key) || { pnl: 0, count: 0 };
-
-    map.set(key, {
-      pnl: prev.pnl + (Number(t.pnl) || 0),
-      count: prev.count + 1,
-    });
-  }
-
-  return map;
 }
