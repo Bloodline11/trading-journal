@@ -363,7 +363,7 @@ function PnLCalendar({ trades }) {
       <div className="flex items-center justify-between gap-3">
         <div>
           <div className="text-xs text-zinc-500">
-            Daily net PnL (UTC day derived from executed_at). Hover for details.
+            Daily net PnL. Hover for details.
           </div>
           <div className="mt-1 text-[11px] text-zinc-600">
             Trades in filtered sample:{" "}
