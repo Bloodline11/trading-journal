@@ -1,5 +1,5 @@
 // src/App.jsx
-import { HashRouter, Routes, Route, Navigate, Link, useNavigate } from "react-router-dom";
+import { Routes, Route, Navigate, Link, useNavigate } from "react-router-dom";
 import { useEffect, useMemo, useState } from "react";
 import { supabase } from "./lib/supabase";
 
@@ -143,27 +143,25 @@ export default function App() {
   if (loading) return null;
 
   return (
-    <HashRouter>
-      <Routes>
-        {!session ? (
-          <>
-            <Route path="/auth" element={<AuthGate />} />
-            <Route path="/login" element={<Login />} />
-            <Route path="/register" element={<Register />} />
-            <Route path="/" element={<Navigate to="/auth" replace />} />
-            <Route path="*" element={<Navigate to="/auth" replace />} />
-          </>
-        ) : (
-          <Route element={<Layout />}>
-            <Route index element={<Dashboard />} />
-            <Route path="trades" element={<Trades />} />
-            <Route path="trades/new" element={<AddTrade />} />
-            <Route path="analytics" element={<Analytics />} />
-            <Route path="settings" element={<Settings />} />
-            <Route path="*" element={<Navigate to="/" replace />} />
-          </Route>
-        )}
-      </Routes>
-    </HashRouter>
-  );
+  <Routes>
+    {!session ? (
+      <>
+        <Route path="/auth" element={<AuthGate />} />
+        <Route path="/login" element={<Login />} />
+        <Route path="/register" element={<Register />} />
+        <Route path="/" element={<Navigate to="/auth" replace />} />
+        <Route path="*" element={<Navigate to="/auth" replace />} />
+      </>
+    ) : (
+      <Route element={<Layout />}>
+        <Route index element={<Dashboard />} />
+        <Route path="trades" element={<Trades />} />
+        <Route path="trades/new" element={<AddTrade />} />
+        <Route path="analytics" element={<Analytics />} />
+        <Route path="settings" element={<Settings />} />
+        <Route path="*" element={<Navigate to="/" replace />} />
+      </Route>
+    )}
+  </Routes>
+);
 }
