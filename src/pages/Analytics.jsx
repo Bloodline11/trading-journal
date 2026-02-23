@@ -244,6 +244,161 @@ function FilterPill({ label, value }) {
   );
 }
 
+function PnLCalendar({ trades }) {
+  // Default: current month (UTC)
+  const now = new Date();
+  const [year, setYear] = useState(now.getUTCFullYear());
+  const [month, setMonth] = useState(now.getUTCMonth()); // 0-11
+
+  const dailyMap = useMemo(() => buildDailyMap(trades), [trades]);
+
+  const maxAbs = useMemo(() => {
+    let m = 0;
+    for (const v of dailyMap.values()) {
+      m = Math.max(m, Math.abs(Number(v.pnl) || 0));
+    }
+    return m;
+  }, [dailyMap]);
+
+  const weeks = useMemo(() => getMonthMatrix(year, month), [year, month]);
+
+  const monthLabel = useMemo(() => {
+    const d = new Date(Date.UTC(year, month, 1));
+    return d.toLocaleString(undefined, { month: "long", year: "numeric", timeZone: "UTC" });
+  }, [year, month]);
+
+  const intensity = (pnl) => {
+    if (!maxAbs) return 0;
+    return clamp(Math.abs(pnl) / maxAbs, 0, 1);
+  };
+
+  const navPrev = () => {
+    const m = month - 1;
+    if (m < 0) {
+      setMonth(11);
+      setYear((y) => y - 1);
+    } else {
+      setMonth(m);
+    }
+  };
+
+  const navNext = () => {
+    const m = month + 1;
+    if (m > 11) {
+      setMonth(0);
+      setYear((y) => y + 1);
+    } else {
+      setMonth(m);
+    }
+  };
+
+  const dow = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+
+  return (
+    <div className="space-y-3">
+      <div className="flex items-center justify-between gap-3">
+        <div>
+          <div className="text-sm font-semibold text-zinc-100">PnL Calendar</div>
+          <div className="text-xs text-zinc-500 mt-0.5">
+            Daily net PnL (UTC day derived from executed_at). Hover for details.
+          </div>
+        </div>
+
+        <div className="flex items-center gap-2">
+          <button
+            type="button"
+            onClick={navPrev}
+            className="rounded-md border border-zinc-800 bg-zinc-950 px-3 py-2 text-sm text-zinc-200 hover:bg-zinc-900"
+            aria-label="Previous month"
+          >
+            ←
+          </button>
+
+          <div className="text-sm text-zinc-200 tabular-nums min-w-[160px] text-center">
+            {monthLabel}
+          </div>
+
+          <button
+            type="button"
+            onClick={navNext}
+            className="rounded-md border border-zinc-800 bg-zinc-950 px-3 py-2 text-sm text-zinc-200 hover:bg-zinc-900"
+            aria-label="Next month"
+          >
+            →
+          </button>
+        </div>
+      </div>
+
+      <div className="rounded-2xl border border-zinc-800 bg-zinc-950/40 p-3 overflow-x-auto">
+        <div className="min-w-[760px]">
+          {/* DOW header */}
+          <div className="grid grid-cols-7 gap-2 mb-2">
+            {dow.map((d) => (
+              <div key={d} className="text-[11px] text-zinc-500 text-center">
+                {d}
+              </div>
+            ))}
+          </div>
+
+          {/* Weeks */}
+          <div className="space-y-2">
+            {weeks.map((w, wi) => (
+              <div key={wi} className="grid grid-cols-7 gap-2">
+                {w.map((dt, di) => {
+                  if (!dt) {
+                    return <div key={di} className="h-20 rounded-xl border border-zinc-900 bg-zinc-950/20" />;
+                  }
+
+                  const key = toUTCDayKey(dt);
+                  const rec = dailyMap.get(key);
+                  const pnl = rec ? Number(rec.pnl) || 0 : 0;
+                  const count = rec ? rec.count : 0;
+
+                  const isPos = pnl > 0;
+                  const isNeg = pnl < 0;
+
+                  const bg = isPos ? CHART.pos : isNeg ? CHART.neg : "#27272a";
+                  const op = count ? 0.15 + 0.65 * intensity(pnl) : 0.08;
+
+                  const title = `${key}\nPnL: $${fmtMoney(pnl)}\nTrades: ${count}`;
+
+                  return (
+                    <div
+                      key={di}
+                      title={title}
+                      className="h-20 rounded-xl border border-zinc-800 p-2 flex flex-col justify-between"
+                      style={{ backgroundColor: bg, opacity: op }}
+                    >
+                      <div className="flex items-center justify-between">
+                        <div className="text-[11px] text-zinc-100 tabular-nums">
+                          {dt.getUTCDate()}
+                        </div>
+                        {count ? (
+                          <div className="text-[10px] text-zinc-200/80 tabular-nums">
+                            {count}
+                          </div>
+                        ) : null}
+                      </div>
+
+                      <div className={`text-xs font-semibold tabular-nums ${pnlTextClass(pnl)}`}>
+                        {count ? `$${fmtMoney(pnl)}` : "—"}
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            ))}
+          </div>
+
+          <div className="mt-2 text-[11px] text-zinc-600">
+            Cell color intensity scales to the max absolute daily PnL in the current filtered sample.
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // ---- Main Page -------------------------------------------------------------
 
 export default function Analytics() {
@@ -584,11 +739,65 @@ export default function Analytics() {
       </Card>
 
       {/* Daily PnL (used later for calendar too) */}
-      <Card title="Daily PnL" subtitle="Daily net PnL (UTC day key derived from executed_at).">
-        <div className="text-xs text-zinc-500">
-          Days in sample: <span className="text-zinc-200 tabular-nums">{daily.length}</span>
-        </div>
-      </Card>
+      <Card title="PnL Calendar" subtitle="Daily net PnL calendar. Hover a day for details.">
+  <PnLCalendar trades={sample} />
+</Card>
     </div>
   );
+}
+// ---- Calendar Helpers ------------------------------------------------------
+
+function getMonthMatrix(year, month) {
+  // month: 0-11
+  const first = new Date(Date.UTC(year, month, 1));
+  const last = new Date(Date.UTC(year, month + 1, 0));
+
+  const startDay = first.getUTCDay(); // 0=Sun
+  const totalDays = last.getUTCDate();
+
+  const weeks = [];
+  let currentWeek = [];
+
+  // pad leading empty cells
+  for (let i = 0; i < startDay; i++) {
+    currentWeek.push(null);
+  }
+
+  for (let day = 1; day <= totalDays; day++) {
+    const dt = new Date(Date.UTC(year, month, day));
+    currentWeek.push(dt);
+
+    if (currentWeek.length === 7) {
+      weeks.push(currentWeek);
+      currentWeek = [];
+    }
+  }
+
+  // pad trailing
+  while (currentWeek.length && currentWeek.length < 7) {
+    currentWeek.push(null);
+  }
+
+  if (currentWeek.length) weeks.push(currentWeek);
+
+  return weeks;
+}
+
+function buildDailyMap(trades) {
+  const map = new Map(); // YYYY-MM-DD -> { pnl, count }
+
+  for (const t of trades) {
+    const dt = safeDate(new Date(tradeTime(t)));
+    if (!dt) continue;
+
+    const key = toUTCDayKey(dt);
+    const prev = map.get(key) || { pnl: 0, count: 0 };
+
+    map.set(key, {
+      pnl: prev.pnl + (Number(t.pnl) || 0),
+      count: prev.count + 1,
+    });
+  }
+
+  return map;
 }
