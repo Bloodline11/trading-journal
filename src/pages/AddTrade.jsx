@@ -1,3 +1,4 @@
+// src/pages/AddTrade.jsx
 import { useMemo, useState } from "react";
 import { supabase } from "../lib/supabase";
 import { useNavigate } from "react-router-dom";
@@ -8,12 +9,32 @@ function toNumOrNull(v) {
   return Number.isFinite(n) ? n : null;
 }
 
+function toExecutedAtISO(dateStr, timeStr) {
+  // dateStr: "YYYY-MM-DD", timeStr: "HH:MM"
+  // Construct a local time Date, then convert to ISO (UTC) for timestamptz.
+  const [y, m, d] = dateStr.split("-").map(Number);
+  const [hh, mm] = timeStr.split(":").map(Number);
+  const local = new Date(y, m - 1, d, hh, mm, 0, 0);
+  return local.toISOString();
+}
+
 export default function AddTrade() {
   const navigate = useNavigate();
 
   const [market, setMarket] = useState("FUTURES"); // UI-only (not stored yet)
   const [symbol, setSymbol] = useState("MNQ");
   const [side, setSide] = useState("LONG");
+
+  // NEW: executed date/time (user-selected)
+  const [executedDate, setExecutedDate] = useState(() =>
+    new Date().toISOString().slice(0, 10) // YYYY-MM-DD
+  );
+  const [executedTime, setExecutedTime] = useState(() => {
+    const d = new Date();
+    const hh = String(d.getHours()).padStart(2, "0");
+    const mm = String(d.getMinutes()).padStart(2, "0");
+    return `${hh}:${mm}`; // HH:MM
+  });
 
   // Optional fields
   const [entryPrice, setEntryPrice] = useState("");
@@ -37,15 +58,20 @@ export default function AddTrade() {
     if (!side) return false;
     // PnL required and must be numeric (can be negative or zero)
     if (pnl === null) return false;
+
+    // executed date/time required
+    if (!executedDate || executedDate.trim().length === 0) return false;
+    if (!executedTime || executedTime.trim().length === 0) return false;
+
     return true;
-  }, [symbol, side, pnl]);
+  }, [symbol, side, pnl, executedDate, executedTime]);
 
   const handleSave = async (e) => {
     e.preventDefault();
     setError("");
 
     if (!canSave) {
-      setError("Symbol and PnL are required. PnL must be a valid number.");
+      setError("Symbol, Executed Date/Time, and PnL are required. PnL must be a valid number.");
       return;
     }
 
@@ -60,14 +86,27 @@ export default function AddTrade() {
       return;
     }
 
+    let executedAtISO;
+    try {
+      executedAtISO = toExecutedAtISO(executedDate, executedTime);
+      if (!executedAtISO || Number.isNaN(Date.parse(executedAtISO))) {
+        throw new Error("Invalid executed date/time.");
+      }
+    } catch {
+      setSaving(false);
+      setError("Invalid Executed Date/Time. Please re-select and try again.");
+      return;
+    }
+
     const payload = {
       user_id: user.id,
       symbol: symbol.trim().toUpperCase(),
       side,
+      executed_at: executedAtISO, // ✅ new column
       entry_price: entry, // optional
-      exit_price: exit,   // optional
-      size: qty,          // optional
-      pnl: pnl,           // ✅ manual input (source of truth)
+      exit_price: exit, // optional
+      size: qty, // optional
+      pnl: pnl, // ✅ manual input (source of truth)
       notes: notes.trim(),
     };
 
@@ -162,8 +201,34 @@ export default function AddTrade() {
                   placeholder="e.g. 125.50 or -80"
                   required
                 />
+                <p className="mt-1 text-xs text-zinc-500">Enter the final realized PnL for this trade.</p>
+              </div>
+            </div>
+
+            {/* Executed date/time */}
+            <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
+              <div>
+                <label className="text-sm text-zinc-300">Executed Date</label>
+                <input
+                  type="date"
+                  className="mt-1 w-full rounded-md border border-zinc-800 bg-zinc-900 p-2"
+                  value={executedDate}
+                  onChange={(e) => setExecutedDate(e.target.value)}
+                  required
+                />
+              </div>
+
+              <div>
+                <label className="text-sm text-zinc-300">Executed Time</label>
+                <input
+                  type="time"
+                  className="mt-1 w-full rounded-md border border-zinc-800 bg-zinc-900 p-2"
+                  value={executedTime}
+                  onChange={(e) => setExecutedTime(e.target.value)}
+                  required
+                />
                 <p className="mt-1 text-xs text-zinc-500">
-                  Enter the final realized PnL for this trade.
+                  Stored as timestamptz in Supabase (your local time converted to UTC).
                 </p>
               </div>
             </div>
@@ -258,9 +323,15 @@ export default function AddTrade() {
             <div className="rounded-lg border border-zinc-900 bg-zinc-900/30 p-3">
               <div className="text-xs text-zinc-400">Entry / Exit</div>
               <div className="mt-1 text-sm text-zinc-200 tabular-nums">
-                {entry === null ? "—" : entry}{" "}
-                <span className="text-zinc-500">→</span>{" "}
+                {entry === null ? "—" : entry} <span className="text-zinc-500">→</span>{" "}
                 {exit === null ? "—" : exit}
+              </div>
+            </div>
+
+            <div className="rounded-lg border border-zinc-900 bg-zinc-900/30 p-3">
+              <div className="text-xs text-zinc-400">Executed</div>
+              <div className="mt-1 text-sm text-zinc-200 tabular-nums">
+                {executedDate} {executedTime}
               </div>
             </div>
           </div>
