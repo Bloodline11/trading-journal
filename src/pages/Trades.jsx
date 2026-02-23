@@ -2,6 +2,13 @@ import { useEffect, useState } from "react";
 import { supabase } from "../lib/supabase";
 import { useNavigate } from "react-router-dom";
 
+function fmtDT(v) {
+  if (!v) return "-";
+  const d = new Date(v);
+  if (Number.isNaN(d.getTime())) return "-";
+  return d.toLocaleString();
+}
+
 export default function Trades() {
   const [rows, setRows] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -14,14 +21,25 @@ export default function Trades() {
     setLoading(true);
 
     const {
-  data: { user },
-} = await supabase.auth.getUser();
+      data: { user },
+      error: userError,
+    } = await supabase.auth.getUser();
 
-const { data, error } = await supabase
-  .from("trades")
-  .select("*")
-  .eq("user_id", user.id)
-  .order("created_at", { ascending: false });
+    if (userError || !user) {
+      setLoading(false);
+      setError("No user session. Please log in again.");
+      return;
+    }
+
+    // IMPORTANT:
+    // - Use executed_at as the primary timestamp for sorting/meaning.
+    // - Fall back to created_at only for legacy rows (executed_at will exist now, but old rows may still be fine).
+    const { data, error } = await supabase
+      .from("trades")
+      .select("*")
+      .eq("user_id", user.id)
+      .order("executed_at", { ascending: false })
+      .order("created_at", { ascending: false });
 
     setLoading(false);
 
@@ -78,13 +96,14 @@ const { data, error } = await supabase
           <table className="w-full text-sm">
             <thead className="bg-zinc-950 text-left text-zinc-300">
               <tr>
-                <th className="p-3">Date</th>
+                <th className="p-3">Executed</th>
                 <th className="p-3">Symbol</th>
                 <th className="p-3">Side</th>
                 <th className="p-3">Entry</th>
                 <th className="p-3">Exit</th>
                 <th className="p-3">Size</th>
                 <th className="p-3">PnL</th>
+                <th className="p-3">Notes</th>
                 <th className="p-3"></th>
               </tr>
             </thead>
@@ -112,10 +131,7 @@ function Row({ trade, onDeleted }) {
 
     setDeleting(true);
 
-    const { error } = await supabase
-      .from("trades")
-      .delete()
-      .eq("id", trade.id);
+    const { error } = await supabase.from("trades").delete().eq("id", trade.id);
 
     setDeleting(false);
 
@@ -127,17 +143,31 @@ function Row({ trade, onDeleted }) {
     onDeleted();
   };
 
+  const executed = trade.executed_at ?? trade.created_at;
+
   return (
     <tr className="border-t border-zinc-800 align-top">
-      <td className="p-3 text-zinc-400">
-        {new Date(trade.created_at).toLocaleString()}
+      <td className="p-3 text-zinc-300">
+        <div className="font-medium">{fmtDT(executed)}</div>
+        <div className="mt-0.5 text-[11px] text-zinc-500">
+          created: {fmtDT(trade.created_at)}
+        </div>
       </td>
+
       <td className="p-3">{trade.symbol}</td>
       <td className="p-3">{trade.side}</td>
       <td className="p-3">{trade.entry_price ?? "-"}</td>
       <td className="p-3">{trade.exit_price ?? "-"}</td>
       <td className="p-3">{trade.size ?? "-"}</td>
-      <td className="p-3">{trade.pnl ?? "-"}</td>
+
+      <td className="p-3 tabular-nums">
+        {trade.pnl ?? "-"}
+      </td>
+
+      <td className="p-3 text-zinc-300">
+        {trade.notes && trade.notes.trim().length > 0 ? trade.notes : <span className="text-zinc-600">—</span>}
+      </td>
+
       <td className="p-3 text-right">
         <button
           type="button"
@@ -148,11 +178,7 @@ function Row({ trade, onDeleted }) {
           {deleting ? "Deleting..." : "Delete"}
         </button>
 
-        {err && (
-          <div className="mt-1 text-xs text-red-300">
-            {err}
-          </div>
-        )}
+        {err && <div className="mt-1 text-xs text-red-300">{err}</div>}
       </td>
     </tr>
   );
