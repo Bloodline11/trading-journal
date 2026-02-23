@@ -1,4 +1,3 @@
-console.log("THIS IS THE ANALYTICS FILE RUNNING");
 // src/pages/Analytics.jsx
 import { useEffect, useMemo, useState } from "react";
 import { useSearchParams } from "react-router-dom";
@@ -9,8 +8,6 @@ import {
   Area,
   LineChart,
   Line,
-  BarChart,
-  Bar,
   CartesianGrid,
   XAxis,
   YAxis,
@@ -20,10 +17,10 @@ import {
 
 /**
  * NOTE:
- * - This page intentionally avoids refactoring auth or schema.
- * - Uses existing trades table + existing logic.
- * - "Expectancy" in this implementation is mean PnL per trade (avg PnL),
- *   and the rolling chart is rolling mean PnL over the last N trades.
+ * - No auth refactor.
+ * - Uses trades table.
+ * - "Expectancy" here = mean PnL per trade (avg PnL).
+ * - Rolling chart = rolling mean PnL over last N trades.
  */
 
 // ---- Constants / Helpers ----------------------------------------------------
@@ -66,21 +63,10 @@ function parseISODate(s) {
 }
 
 function toUTCDayKey(dt) {
-  // YYYY-MM-DD in UTC
   const y = dt.getUTCFullYear();
   const m = String(dt.getUTCMonth() + 1).padStart(2, "0");
   const d = String(dt.getUTCDate()).padStart(2, "0");
   return `${y}-${m}-${d}`;
-}
-
-function weekdayNameUTC(dt) {
-  // 0=Sun..6=Sat
-  const idx = dt.getUTCDay();
-  return ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"][idx] || "NA";
-}
-
-function hourUTC(dt) {
-  return dt.getUTCHours();
 }
 
 function safeDate(dt) {
@@ -88,7 +74,12 @@ function safeDate(dt) {
   return Number.isFinite(t) ? dt : null;
 }
 
-// ---- Stats ---------------------------------------------------------------
+function tradeTime(t) {
+  // Primary timestamp is executed_at; fallback to created_at for legacy
+  return t?.executed_at || t?.created_at || t?.date || t?.timestamp;
+}
+
+// ---- Stats -----------------------------------------------------------------
 
 function computeStats(trades) {
   const pnls = trades.map((t) => Number(t.pnl) || 0);
@@ -105,11 +96,10 @@ function computeStats(trades) {
   const n = pnls.length;
 
   const grossWin = wins.reduce((a, b) => a + b, 0);
-  const grossLossAbs = Math.abs(losses.reduce((a, b) => a + b, 0)); // abs sum losses
+  const grossLossAbs = Math.abs(losses.reduce((a, b) => a + b, 0));
 
   const pf = grossLossAbs === 0 ? (grossWin > 0 ? Infinity : 0) : grossWin / grossLossAbs;
 
-  // "Expectancy" here = mean pnl per trade over the current filtered sample.
   const expectancy = n ? total / n : 0;
 
   // Max drawdown on cumulative equity curve
@@ -124,8 +114,7 @@ function computeStats(trades) {
   }
 
   const avgWin = winCount ? grossWin / winCount : 0;
-  const avgLossAbs = lossCount ? Math.abs(losses.reduce((a, b) => a + b, 0)) / lossCount : 0;
-
+  const avgLossAbs = lossCount ? grossLossAbs / lossCount : 0;
   const winRate = n ? winCount / n : 0;
 
   return {
@@ -146,7 +135,6 @@ function computeStats(trades) {
 }
 
 function equitySeries(trades) {
-  // returns [{i, equity, equityPos, equityNeg}]
   let eq = 0;
   const out = [];
   for (let i = 0; i < trades.length; i++) {
@@ -165,7 +153,7 @@ function equitySeries(trades) {
 function dailyPnL(trades) {
   const map = new Map(); // dayKey -> pnl
   for (const t of trades) {
-    const dt = safeDate(new Date(t.entry_time || t.created_at || t.date || t.timestamp));
+    const dt = safeDate(new Date(tradeTime(t)));
     if (!dt) continue;
     const key = toUTCDayKey(dt);
     map.set(key, (map.get(key) || 0) + (Number(t.pnl) || 0));
@@ -179,31 +167,6 @@ function dailyPnL(trades) {
       pnl: v,
       pnlPos: v >= 0 ? v : null,
       pnlNeg: v < 0 ? v : null,
-    };
-  });
-}
-
-function avgByWeekday(trades) {
-  const sums = new Map(); // weekday -> sum
-  const counts = new Map(); // weekday -> count
-  for (const t of trades) {
-    const dt = safeDate(new Date(t.entry_time || t.created_at || t.date || t.timestamp));
-    if (!dt) continue;
-    const wd = weekdayNameUTC(dt);
-    sums.set(wd, (sums.get(wd) || 0) + (Number(t.pnl) || 0));
-    counts.set(wd, (counts.get(wd) || 0) + 1);
-  }
-  const order = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
-  return order.map((wd) => {
-    const c = counts.get(wd) || 0;
-    const s = sums.get(wd) || 0;
-    const v = c ? s / c : 0;
-    return {
-      wd,
-      avg: v,
-      avgPos: v >= 0 ? v : null,
-      avgNeg: v < 0 ? v : null,
-      n: c,
     };
   });
 }
@@ -234,40 +197,6 @@ function rollingExpectancy(trades, window = 30) {
   }
 
   return out;
-}
-
-function buildPnLHeatmap(trades) {
-  // avg pnl per trade by weekday x hour (UTC)
-  // data: rows (weekday) with 24 hours
-  const weekdays = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
-
-  const sums = new Map(); // key = wd|h -> sum
-  const counts = new Map(); // key = wd|h -> count
-
-  for (const t of trades) {
-    const dt = safeDate(new Date(t.entry_time || t.created_at || t.date || t.timestamp));
-    if (!dt) continue;
-    const wd = weekdayNameUTC(dt);
-    const h = hourUTC(dt);
-    const key = `${wd}|${h}`;
-    sums.set(key, (sums.get(key) || 0) + (Number(t.pnl) || 0));
-    counts.set(key, (counts.get(key) || 0) + 1);
-  }
-
-  let maxAbs = 0;
-  const rows = weekdays.map((wd) => {
-    const hours = Array.from({ length: 24 }, (_, h) => {
-      const key = `${wd}|${h}`;
-      const c = counts.get(key) || 0;
-      const s = sums.get(key) || 0;
-      const avg = c ? s / c : 0;
-      maxAbs = Math.max(maxAbs, Math.abs(avg));
-      return { h, avg, n: c };
-    });
-    return { wd, hours };
-  });
-
-  return { rows, maxAbs };
 }
 
 // ---- UI Components ---------------------------------------------------------
@@ -306,15 +235,6 @@ function DarkTooltip({ active, payload, label }) {
   );
 }
 
-function SectionHeader({ title, right }) {
-  return (
-    <div className="flex items-center justify-between gap-3 mb-2">
-      <div className="text-sm font-semibold text-zinc-100">{title}</div>
-      {right ? <div className="text-xs text-zinc-500">{right}</div> : null}
-    </div>
-  );
-}
-
 function FilterPill({ label, value }) {
   return (
     <div className="px-2 py-1 rounded-full border border-zinc-800 bg-zinc-950/40 text-xs text-zinc-400">
@@ -327,36 +247,68 @@ function FilterPill({ label, value }) {
 // ---- Main Page -------------------------------------------------------------
 
 export default function Analytics() {
-  const [searchParams] = useSearchParams();
+  const [searchParams, setSearchParams] = useSearchParams();
+
   const [loading, setLoading] = useState(true);
   const [trades, setTrades] = useState([]);
 
-  // URL filters (as per thread-state export)
+  // URL filters (source of truth)
   const from = searchParams.get("from") || "";
   const to = searchParams.get("to") || "";
   const symbol = searchParams.get("symbol") || "";
-  const asset = searchParams.get("asset") || "";
   const side = searchParams.get("side") || "";
+
+  // Controlled inputs for filter UI
+  const [uiFrom, setUiFrom] = useState(from);
+  const [uiTo, setUiTo] = useState(to);
+  const [uiSymbol, setUiSymbol] = useState(symbol);
+  const [uiSide, setUiSide] = useState(side);
+
+  // Keep UI inputs synced if URL changes externally
+  useEffect(() => {
+    setUiFrom(from);
+    setUiTo(to);
+    setUiSymbol(symbol);
+    setUiSide(side);
+  }, [from, to, symbol, side]);
 
   useEffect(() => {
     let alive = true;
 
     async function load() {
       setLoading(true);
+
+      const {
+        data: { user },
+        error: userError,
+      } = await supabase.auth.getUser();
+
+      if (!alive) return;
+
+      if (userError || !user) {
+        console.error("Analytics: no user session", userError);
+        setTrades([]);
+        setLoading(false);
+        return;
+      }
+
+      // Scope to user_id and order by executed_at (chronological)
       const { data, error } = await supabase
         .from("trades")
         .select("*")
+        .eq("user_id", user.id)
+        .order("executed_at", { ascending: true })
         .order("created_at", { ascending: true });
 
       if (!alive) return;
 
       if (error) {
-  console.error("Analytics trades load error:", error);
-  alert("Analytics load failed. Check console.");
-  setTrades([]);
-  setLoading(false);
-  return;
-}
+        console.error("Analytics trades load error:", error);
+        alert("Analytics load failed. Check console.");
+        setTrades([]);
+        setLoading(false);
+        return;
+      }
 
       setTrades(data || []);
       setLoading(false);
@@ -371,22 +323,20 @@ export default function Analytics() {
   const sample = useMemo(() => {
     let out = [...trades];
 
-    // Filter by date range if provided (assumes entry_time is ISO or timestamp)
     const fromDt = parseISODate(from);
     const toDt = parseISODate(to);
 
     if (fromDt) {
       out = out.filter((t) => {
-        const dt = safeDate(new Date(t.entry_time || t.created_at || t.date || t.timestamp));
+        const dt = safeDate(new Date(tradeTime(t)));
         return dt ? dt.getTime() >= fromDt.getTime() : false;
       });
     }
 
     if (toDt) {
-      // inclusive to end of day UTC
       const end = new Date(toDt.getTime() + 24 * 60 * 60 * 1000 - 1);
       out = out.filter((t) => {
-        const dt = safeDate(new Date(t.entry_time || t.created_at || t.date || t.timestamp));
+        const dt = safeDate(new Date(tradeTime(t)));
         return dt ? dt.getTime() <= end.getTime() : false;
       });
     }
@@ -396,32 +346,44 @@ export default function Analytics() {
       out = out.filter((t) => String(t.symbol || "").toLowerCase() === s);
     }
 
-    if (asset) {
-      const a = asset.trim().toLowerCase();
-      out = out.filter((t) => String(t.asset || "").toLowerCase() === a);
-    }
-
     if (side) {
-      const sd = side.trim().toLowerCase();
-      out = out.filter((t) => String(t.side || "").toLowerCase() === sd);
+      const sd = side.trim().toUpperCase();
+      out = out.filter((t) => String(t.side || "").toUpperCase() === sd);
     }
 
-    // Ensure stable chronological order for equity + rolling
+    // Ensure stable chronological order (executed_at primary)
     out.sort((a, b) => {
-      const da = new Date(a.entry_time || a.created_at || a.date || a.timestamp).getTime();
-      const db = new Date(b.entry_time || b.created_at || b.date || b.timestamp).getTime();
+      const da = new Date(tradeTime(a)).getTime();
+      const db = new Date(tradeTime(b)).getTime();
       return da - db;
     });
 
     return out;
-  }, [trades, from, to, symbol, asset, side]);
+  }, [trades, from, to, symbol, side]);
 
   const equity = useMemo(() => equitySeries(sample), [sample]);
   const daily = useMemo(() => dailyPnL(sample), [sample]);
-  const weekdayAvg = useMemo(() => avgByWeekday(sample), [sample]);
   const rollExp = useMemo(() => rollingExpectancy(sample, 30), [sample]);
-  const heat = useMemo(() => buildPnLHeatmap(sample), [sample]);
   const stats = useMemo(() => computeStats(sample), [sample]);
+
+  const applyFilters = () => {
+    const next = new URLSearchParams();
+
+    if (uiFrom && uiFrom.trim()) next.set("from", uiFrom.trim());
+    if (uiTo && uiTo.trim()) next.set("to", uiTo.trim());
+    if (uiSymbol && uiSymbol.trim()) next.set("symbol", uiSymbol.trim().toUpperCase());
+    if (uiSide && uiSide.trim()) next.set("side", uiSide.trim().toUpperCase());
+
+    setSearchParams(next, { replace: true });
+  };
+
+  const clearFilters = () => {
+    setUiFrom("");
+    setUiTo("");
+    setUiSymbol("");
+    setUiSide("");
+    setSearchParams(new URLSearchParams(), { replace: true });
+  };
 
   if (loading) return <div className="p-6 text-sm text-zinc-400">Loading analytics…</div>;
 
@@ -430,20 +392,84 @@ export default function Analytics() {
       <div className="flex flex-wrap items-end justify-between gap-3">
         <div>
           <div className="text-xl font-semibold text-zinc-100">Analytics</div>
-          <div className="text-xs text-zinc-500 mt-1">
-            //: <span className="text-zinc-300">from</span>, <span className="text-zinc-300">to</span>,{" "}
-            <span className="text-zinc-300">symbol</span>, <span className="text-zinc-300">asset</span>,{" "}
-            <span className="text-zinc-300">side</span>
-          </div>
+          <div className="text-xs text-zinc-500 mt-1">Filters drive all charts on this page.</div>
         </div>
 
         <div className="flex flex-wrap items-center gap-2">
           {from ? <FilterPill label="from" value={from} /> : null}
           {to ? <FilterPill label="to" value={to} /> : null}
           {symbol ? <FilterPill label="symbol" value={symbol} /> : null}
-          {asset ? <FilterPill label="asset" value={asset} /> : null}
           {side ? <FilterPill label="side" value={side} /> : null}
           <FilterPill label="trades" value={String(stats.n)} />
+        </div>
+      </div>
+
+      {/* FILTER BAR (functional) */}
+      <div className="rounded-2xl bg-zinc-950/60 border border-zinc-800 p-4">
+        <div className="grid grid-cols-1 md:grid-cols-5 gap-3">
+          <div>
+            <div className="text-xs text-zinc-500">From</div>
+            <input
+              type="date"
+              className="mt-1 w-full rounded-md border border-zinc-800 bg-zinc-900 p-2 text-sm"
+              value={uiFrom}
+              onChange={(e) => setUiFrom(e.target.value)}
+            />
+          </div>
+
+          <div>
+            <div className="text-xs text-zinc-500">To</div>
+            <input
+              type="date"
+              className="mt-1 w-full rounded-md border border-zinc-800 bg-zinc-900 p-2 text-sm"
+              value={uiTo}
+              onChange={(e) => setUiTo(e.target.value)}
+            />
+          </div>
+
+          <div>
+            <div className="text-xs text-zinc-500">Symbol</div>
+            <input
+              className="mt-1 w-full rounded-md border border-zinc-800 bg-zinc-900 p-2 text-sm"
+              value={uiSymbol}
+              onChange={(e) => setUiSymbol(e.target.value)}
+              placeholder="MNQ"
+            />
+          </div>
+
+          <div>
+            <div className="text-xs text-zinc-500">Side</div>
+            <select
+              className="mt-1 w-full rounded-md border border-zinc-800 bg-zinc-900 p-2 text-sm"
+              value={uiSide}
+              onChange={(e) => setUiSide(e.target.value)}
+            >
+              <option value="">All</option>
+              <option value="LONG">LONG</option>
+              <option value="SHORT">SHORT</option>
+            </select>
+          </div>
+
+          <div className="flex items-end gap-2">
+            <button
+              type="button"
+              onClick={applyFilters}
+              className="w-full rounded-md bg-zinc-50 px-4 py-2 text-sm font-medium text-zinc-950 hover:bg-white"
+            >
+              Apply
+            </button>
+            <button
+              type="button"
+              onClick={clearFilters}
+              className="w-full rounded-md border border-zinc-800 bg-zinc-950 px-4 py-2 text-sm text-zinc-200 hover:bg-zinc-900"
+            >
+              Clear
+            </button>
+          </div>
+        </div>
+
+        <div className="mt-2 text-[11px] text-zinc-600">
+          Date filters use <span className="text-zinc-300">executed_at</span> (fallback: created_at for legacy).
         </div>
       </div>
 
@@ -475,10 +501,12 @@ export default function Analytics() {
       </div>
 
       {/* Equity Curve */}
-      <Card title="Equity Curve" subtitle="Cumulative PnL over time .">
+      <Card title="Equity Curve" subtitle="Cumulative PnL over time.">
         <div className="h-[280px]">
           {equity.length === 0 ? (
-            <div className="h-full flex items-center justify-center text-sm text-zinc-500">No trades for current filters.</div>
+            <div className="h-full flex items-center justify-center text-sm text-zinc-500">
+              No trades for current filters.
+            </div>
           ) : (
             <ResponsiveContainer>
               <AreaChart data={equity}>
@@ -513,15 +541,16 @@ export default function Analytics() {
         </div>
       </Card>
 
-
-
-   
-
       {/* Rolling Expectancy */}
-      <Card title="Rolling 30-Trade Avg PnL (Expectancy)" subtitle="Edge stability monitor: rolling mean PnL over the last 30 trades.">
+      <Card
+        title="Rolling 30-Trade Avg PnL (Expectancy)"
+        subtitle="Edge stability monitor: rolling mean PnL over the last 30 trades."
+      >
         <div className="h-[280px]">
           {rollExp.length === 0 ? (
-            <div className="h-full flex items-center justify-center text-sm text-zinc-500">No trades for current filters.</div>
+            <div className="h-full flex items-center justify-center text-sm text-zinc-500">
+              No trades for current filters.
+            </div>
           ) : (
             <ResponsiveContainer>
               <LineChart data={rollExp}>
@@ -530,97 +559,36 @@ export default function Analytics() {
                 <YAxis tick={{ fill: CHART.axis, fontSize: 11 }} />
                 <Tooltip content={<DarkTooltip />} cursor={{ fill: "transparent" }} />
                 <ReferenceLine y={0} stroke={CHART.zero} />
-                <Line type="monotone" dataKey="expPos" name="Avg PnL +" stroke={CHART.pos} strokeWidth={2} dot={false} connectNulls={false} />
-                <Line type="monotone" dataKey="expNeg" name="Avg PnL -" stroke={CHART.neg} strokeWidth={2} dot={false} connectNulls={false} />
+                <Line
+                  type="monotone"
+                  dataKey="expPos"
+                  name="Avg PnL +"
+                  stroke={CHART.pos}
+                  strokeWidth={2}
+                  dot={false}
+                  connectNulls={false}
+                />
+                <Line
+                  type="monotone"
+                  dataKey="expNeg"
+                  name="Avg PnL -"
+                  stroke={CHART.neg}
+                  strokeWidth={2}
+                  dot={false}
+                  connectNulls={false}
+                />
               </LineChart>
             </ResponsiveContainer>
           )}
         </div>
       </Card>
 
-      
-    </div>
-  );
-}
-
-function Heatmap({ heat }) {
-  const { rows, maxAbs } = heat;
-  const scale = (v) => {
-    if (!maxAbs) return 0;
-    return clamp(Math.abs(v) / maxAbs, 0, 1);
-  };
-
-  return (
-    <div className="space-y-3">
-      <div className="flex items-center justify-between gap-4">
+      {/* Daily PnL (used later for calendar too) */}
+      <Card title="Daily PnL" subtitle="Daily net PnL (UTC day key derived from executed_at).">
         <div className="text-xs text-zinc-500">
-        
-          <span className="font-semibold text-zinc-200 tabular-nums">${fmtMoney(maxAbs)}</span>
+          Days in sample: <span className="text-zinc-200 tabular-nums">{daily.length}</span>
         </div>
-        <div className="flex items-center gap-2 text-xs text-zinc-500">
-          <span className="tabular-nums">0</span>
-          <div className="h-2 w-28 rounded-full overflow-hidden border border-zinc-800">
-            <div
-              className="h-full w-1/2 inline-block"
-              style={{
-                background: `linear-gradient(to right, ${CHART.pos}, ${CHART.pos})`,
-                opacity: 0.25,
-              }}
-            />
-            <div
-              className="h-full w-1/2 inline-block"
-              style={{
-                background: `linear-gradient(to right, ${CHART.neg}, ${CHART.neg})`,
-                opacity: 0.25,
-              }}
-            />
-          </div>
-          <span className="tabular-nums">{fmtMoney(maxAbs)}</span>
-        </div>
-      </div>
-
-      <div className="overflow-x-auto">
-        <div className="min-w-[880px]">
-          <div className="grid grid-cols-[80px_repeat(24,minmax(0,1fr))] gap-1 text-[11px] text-zinc-600 mb-2">
-            <div />
-            {Array.from({ length: 24 }, (_, h) => (
-              <div key={h} className="text-center tabular-nums">
-                {String(h).padStart(2, "0")}
-              </div>
-            ))}
-          </div>
-
-          <div className="space-y-1">
-            {rows.map((r) => (
-              <div key={r.wd} className="grid grid-cols-[80px_repeat(24,minmax(0,1fr))] gap-1">
-                <div className="text-[11px] text-zinc-500 flex items-center">{r.wd}</div>
-                {r.hours.map((cell) => {
-                  const a = cell.avg;
-                  const intensity = scale(a);
-                  const isPos = a >= 0;
-                  const bg = isPos ? CHART.pos : CHART.neg;
-
-                  return (
-                    <div
-                      key={cell.h}
-                      title={`${r.wd} ${String(cell.h).padStart(2, "0")}:00 • avg=$${fmtMoney(a)} • n=${cell.n}`}
-                      className="h-7 rounded-md border border-zinc-800"
-                      style={{
-                        backgroundColor: bg,
-                        opacity: cell.n ? 0.15 + 0.55 * intensity : 0.08,
-                      }}
-                    />
-                  );
-                })}
-              </div>
-            ))}
-          </div>
-
-          <div className="mt-2 text-[11px] text-zinc-600">
-            Tip: hover a cell for its avg PnL and sample size.
-          </div>
-        </div>
-      </div>
+      </Card>
     </div>
   );
 }
