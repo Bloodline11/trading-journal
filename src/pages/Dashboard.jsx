@@ -1,3 +1,4 @@
+// src/pages/Dashboard.jsx
 import { useEffect, useMemo, useState } from "react";
 import { supabase } from "../lib/supabase";
 import { getAccount } from "../lib/account";
@@ -42,10 +43,10 @@ function utcDayKey(iso) {
 }
 
 /**
- * Dashboard DAILY equity curve
+ * Dashboard DAILY equity curve (performance from 0)
  * - 1 point per UTC day
  * - Explicit 0 starting anchor
- * - Cumulative from zero
+ * - Cumulative from zero (PnL performance)
  */
 function computeDailyEquity(trades) {
   const sorted = [...(trades || [])].sort((a, b) => {
@@ -95,12 +96,15 @@ function computeDailyEquity(trades) {
 }
 
 /**
- * Per-trade stats engine
- * - Uses canonical sorting: executed_at then created_at
- * - Performance curve starts at 0 (pnl cumulative)
+ * Per-trade stats engine (for the stat cards)
  *
- * CHANGE REQUEST:
- * Max Drawdown % should be relative to INITIAL BALANCE (not peak equity).
+ * IMPORTANT:
+ * - Performance curve starts at 0 (cumulative pnl) for "equity" series if needed.
+ * - BUT drawdown is calculated on ACCOUNT EQUITY:
+ *   accountEquity = initialBalance + cumulativePnl
+ *
+ * Max Drawdown % definition (professional):
+ *   ddPct = (peakAccountEquity - currentAccountEquity) / peakAccountEquity * 100
  */
 function computeEquityAndStats(trades, initialBalance) {
   const sorted = [...(trades || [])].sort((a, b) => {
@@ -109,8 +113,14 @@ function computeEquityAndStats(trades, initialBalance) {
     return ta - tb;
   });
 
-  let balance = 0; // performance starts at 0
-  let peak = 0; // peak of performance curve
+  const initBal = Number(initialBalance) || 0;
+
+  // Performance curve (starts at 0)
+  let perf = 0;
+
+  // Account equity curve (starts at initial balance)
+  let accountEquity = initBal;
+  let peakAccountEquity = initBal;
 
   let totalPnl = 0;
   let wins = 0;
@@ -119,7 +129,8 @@ function computeEquityAndStats(trades, initialBalance) {
   let sumWins = 0;
   let sumLossAbs = 0;
 
-  let maxDd = 0; // dollars (positive number)
+  let maxDd = 0; // dollars
+  let maxDdPct = 0; // percent of PEAK ACCOUNT EQUITY
 
   const equity = [];
 
@@ -127,7 +138,11 @@ function computeEquityAndStats(trades, initialBalance) {
     const pnl = Number(t.pnl) || 0;
     totalPnl += pnl;
 
-    balance += pnl;
+    // performance from 0
+    perf += pnl;
+
+    // account equity for drawdown
+    accountEquity = initBal + perf;
 
     if (pnl > 0) {
       wins += 1;
@@ -137,14 +152,21 @@ function computeEquityAndStats(trades, initialBalance) {
       sumLossAbs += Math.abs(pnl);
     }
 
-    if (balance > peak) peak = balance;
+    // update peak account equity
+    if (accountEquity > peakAccountEquity) peakAccountEquity = accountEquity;
 
-    const dd = peak - balance; // positive if below peak
+    // drawdown in dollars from peak
+    const dd = peakAccountEquity - accountEquity;
     if (dd > maxDd) maxDd = dd;
 
+    // drawdown % relative to peak account equity
+    const ddPct = peakAccountEquity > 0 ? (dd / peakAccountEquity) * 100 : 0;
+    if (ddPct > maxDdPct) maxDdPct = ddPct;
+
+    // keep series as performance curve (0-based) for consistency
     equity.push({
       i: equity.length + 1,
-      balance: Number(balance.toFixed(2)),
+      balance: Number(perf.toFixed(2)),
       pnl: Number(pnl.toFixed(2)),
     });
   }
@@ -152,18 +174,12 @@ function computeEquityAndStats(trades, initialBalance) {
   const totalTrades = sorted.length;
   const winrate = totalTrades ? (wins / totalTrades) * 100 : 0;
 
-  const initBal = Number(initialBalance) || 0;
   const endingBalance = initBal + totalPnl;
 
   const avgWin = wins ? sumWins / wins : 0;
-  const avgLoss = losses ? -(sumLossAbs / losses) : 0;
-
+  const avgLoss = losses ? -(sumLossAbs / losses) : 0; // negative number for display
   const profitFactor =
     sumLossAbs > 0 ? sumWins / sumLossAbs : wins > 0 ? Infinity : 0;
-
-  // ✅ Requested definition:
-  // Max drawdown percentage as a % of INITIAL BALANCE
-  const maxDdPct = initBal > 0 ? (maxDd / initBal) * 100 : 0;
 
   return {
     equity,
@@ -192,9 +208,7 @@ function DailyTooltip({ active, payload }) {
       <div className="text-zinc-400">Day: {p.day}</div>
       <div className="mt-1">
         <span className="text-zinc-400">Balance:</span>{" "}
-        <span className="font-semibold tabular-nums">
-          ${fmtMoney(p.balance)}
-        </span>
+        <span className="font-semibold tabular-nums">${fmtMoney(p.balance)}</span>
       </div>
       <div className="mt-1">
         <span className="text-zinc-400">PnL:</span>{" "}
@@ -273,7 +287,7 @@ export default function Dashboard() {
           <div>
             <div className="text-sm text-zinc-300 font-semibold">Equity Curve</div>
             <div className="text-xs text-zinc-500">
-              Balance aggregated per day (UTC). Starts at zero.
+              Performance aggregated per day (UTC). Starts at zero.
             </div>
           </div>
           <div className="text-xs text-zinc-400">
