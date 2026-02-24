@@ -15,23 +15,18 @@ import {
   ReferenceLine,
 } from "recharts";
 
-/**
- * NOTE:
- * - No auth refactor.
- * - Uses trades table.
- * - "Expectancy" here = mean PnL per trade (avg PnL).
- * - Rolling chart = rolling mean PnL over last N trades.
- */
-
-// ---- Constants / Helpers ----------------------------------------------------
+// ---- Styling constants ------------------------------------------------------
 
 const CHART = {
   grid: "#1f2937",
   axis: "#a1a1aa",
   zero: "#3f3f46",
-  pos: "#1e3a8a", // charcoal blue
-  neg: "#7f1d1d", // charcoal red
+  pos: "#1e3a8a",
+  neg: "#7f1d1d",
+  band: "#52525b",
 };
+
+// ---- Helpers ----------------------------------------------------------------
 
 function clamp(n, lo, hi) {
   return Math.max(lo, Math.min(hi, n));
@@ -79,7 +74,15 @@ function tradeTime(t) {
   return t?.executed_at || t?.created_at || t?.date || t?.timestamp;
 }
 
-// ---- Stats -----------------------------------------------------------------
+function fmtUTCTime(iso) {
+  const dt = safeDate(new Date(iso));
+  if (!dt) return "—";
+  const hh = String(dt.getUTCHours()).padStart(2, "0");
+  const mm = String(dt.getUTCMinutes()).padStart(2, "0");
+  return `${hh}:${mm} UTC`;
+}
+
+// ---- Stats ------------------------------------------------------------------
 
 function computeStats(trades) {
   const pnls = trades.map((t) => Number(t.pnl) || 0);
@@ -103,7 +106,7 @@ function computeStats(trades) {
 
   const expectancy = n ? total / n : 0;
 
-  // Max drawdown on cumulative equity curve
+  // Max drawdown on cumulative equity curve (performance curve from 0)
   let peak = 0;
   let eq = 0;
   let maxDD = 0;
@@ -172,38 +175,62 @@ function dailyPnL(trades) {
   });
 }
 
-function rollingExpectancy(trades, window = 30) {
+/**
+ * Rolling Expectancy with Confidence Bands
+ * mean ± 2*SE, SE = stdev / sqrt(n)
+ */
+function rollingExpectancyWithBands(trades, window = 30) {
   if (!trades.length) return [];
 
   const out = [];
-  let sum = 0;
   const q = [];
+  let sum = 0;
+  let sumSq = 0;
 
   for (let i = 0; i < trades.length; i++) {
     const p = Number(trades[i].pnl) || 0;
+
     q.push(p);
     sum += p;
+    sumSq += p * p;
 
-    if (q.length > window) sum -= q.shift();
+    if (q.length > window) {
+      const removed = q.shift();
+      sum -= removed;
+      sumSq -= removed * removed;
+    }
 
-    const denom = q.length;
-    const exp = denom ? sum / denom : 0;
+    const n = q.length;
+    const mean = n ? sum / n : 0;
+
+    let variance = 0;
+    if (n > 1) {
+      const numer = sumSq - (sum * sum) / n;
+      variance = numer > 0 ? numer / (n - 1) : 0;
+    }
+
+    const stdev = Math.sqrt(variance);
+    const se = n ? stdev / Math.sqrt(n) : 0;
+    const band = 2 * se;
 
     out.push({
       i: i + 1,
-      exp,
-      expPos: exp >= 0 ? exp : null,
-      expNeg: exp < 0 ? exp : null,
+      n,
+      mean,
+      meanPos: mean >= 0 ? mean : null,
+      meanNeg: mean < 0 ? mean : null,
+      upper: mean + band,
+      lower: mean - band,
+      se,
     });
   }
 
   return out;
 }
 
-// ---- Calendar Helpers ------------------------------------------------------
+// ---- Calendar helpers -------------------------------------------------------
 
 function getMonthMatrix(year, month) {
-  // month: 0-11
   const first = new Date(Date.UTC(year, month, 1));
   const last = new Date(Date.UTC(year, month + 1, 0));
 
@@ -213,10 +240,7 @@ function getMonthMatrix(year, month) {
   const weeks = [];
   let currentWeek = [];
 
-  // pad leading empty cells
-  for (let i = 0; i < startDay; i++) {
-    currentWeek.push(null);
-  }
+  for (let i = 0; i < startDay; i++) currentWeek.push(null);
 
   for (let day = 1; day <= totalDays; day++) {
     const dt = new Date(Date.UTC(year, month, day));
@@ -228,11 +252,7 @@ function getMonthMatrix(year, month) {
     }
   }
 
-  // pad trailing
-  while (currentWeek.length && currentWeek.length < 7) {
-    currentWeek.push(null);
-  }
-
+  while (currentWeek.length && currentWeek.length < 7) currentWeek.push(null);
   if (currentWeek.length) weeks.push(currentWeek);
 
   return weeks;
@@ -240,7 +260,6 @@ function getMonthMatrix(year, month) {
 
 function buildDailyMap(trades) {
   const map = new Map(); // YYYY-MM-DD -> { pnl, count }
-
   for (const t of trades) {
     const dt = safeDate(new Date(tradeTime(t)));
     if (!dt) continue;
@@ -253,11 +272,29 @@ function buildDailyMap(trades) {
       count: prev.count + 1,
     });
   }
-
   return map;
 }
 
-// ---- UI Components ---------------------------------------------------------
+function tradesForDayUTC(trades, dayKey) {
+  if (!dayKey) return [];
+  const out = [];
+
+  for (const t of trades) {
+    const dt = safeDate(new Date(tradeTime(t)));
+    if (!dt) continue;
+    if (toUTCDayKey(dt) === dayKey) out.push(t);
+  }
+
+  out.sort((a, b) => {
+    const da = new Date(tradeTime(a)).getTime();
+    const db = new Date(tradeTime(b)).getTime();
+    return da - db;
+  });
+
+  return out;
+}
+
+// ---- UI components ----------------------------------------------------------
 
 function Card({ title, subtitle, children }) {
   return (
@@ -285,15 +322,43 @@ function StatTile({ label, value, sub, valueClass = "text-zinc-100" }) {
   );
 }
 
-function DarkTooltip({ active, payload, label }) {
+function EquityTooltip({ active, payload, label }) {
   if (!active || !payload || !payload.length) return null;
-  const p = payload[0]?.value;
-  const v = Number(p);
+  const v = Number(payload[0]?.value || 0);
   return (
     <div className="rounded-xl border border-zinc-800 bg-zinc-950/95 px-3 py-2 shadow-lg">
-      <div className="text-[11px] text-zinc-500 mb-1">#{label}</div>
+      <div className="text-[11px] text-zinc-500 mb-1">Trade #{label}</div>
       <div className={`text-sm font-semibold tabular-nums ${pnlTextClass(v)}`}>
         ${fmtMoney(v)}
+      </div>
+    </div>
+  );
+}
+
+function RollingBandsTooltip({ active, payload, label }) {
+  if (!active || !payload || !payload.length) return null;
+
+  const row = payload[0]?.payload;
+  if (!row) return null;
+
+  const mean = Number(row.mean) || 0;
+  const upper = Number(row.upper) || 0;
+  const lower = Number(row.lower) || 0;
+  const n = Number(row.n) || 0;
+
+  return (
+    <div className="rounded-xl border border-zinc-800 bg-zinc-950/95 px-3 py-2 shadow-lg">
+      <div className="text-[11px] text-zinc-500 mb-1">
+        Trade #{label} • Based on last {n} trades
+      </div>
+      <div className={`text-sm font-semibold tabular-nums ${pnlTextClass(mean)}`}>
+        Average: ${fmtMoney(mean)} / trade
+      </div>
+      <div className="text-[12px] text-zinc-300 tabular-nums mt-1">
+        Confidence range: ${fmtMoney(lower)} → ${fmtMoney(upper)}
+      </div>
+      <div className="text-[11px] text-zinc-500 mt-1">
+        Narrow range = more consistent. Wide range = more variable.
       </div>
     </div>
   );
@@ -308,11 +373,114 @@ function FilterPill({ label, value }) {
   );
 }
 
+function DayTradesPanel({ dayKey, dayTrades, onClear }) {
+  if (!dayKey) return null;
+
+  const dayTotal = dayTrades.reduce((a, t) => a + (Number(t.pnl) || 0), 0);
+
+  return (
+    <div className="mt-4 rounded-2xl border border-zinc-800 bg-zinc-950/40 p-3">
+      <div className="flex flex-wrap items-start justify-between gap-2">
+        <div>
+          <div className="text-sm font-semibold text-zinc-100">
+            Trades on {dayKey}
+          </div>
+          <div className="text-[11px] text-zinc-600 mt-0.5">
+            Showing trades from this date (times displayed in UTC).
+          </div>
+        </div>
+
+        <div className="flex items-center gap-3">
+          <div className="text-xs text-zinc-400">
+            Day total:{" "}
+            <span className={`tabular-nums ${pnlTextClass(dayTotal)}`}>
+              ${fmtMoney(dayTotal)}
+            </span>
+            {"  "}•{" "}
+            <span className="text-zinc-200 tabular-nums">{dayTrades.length}</span>{" "}
+            trades
+          </div>
+
+          <button
+            type="button"
+            onClick={onClear}
+            className="rounded-md border border-zinc-800 bg-zinc-950 px-3 py-2 text-xs text-zinc-200 hover:bg-zinc-900"
+          >
+            Clear
+          </button>
+        </div>
+      </div>
+
+      {dayTrades.length === 0 ? (
+        <div className="mt-3 text-sm text-zinc-500">No trades recorded for this day.</div>
+      ) : (
+        <div className="mt-3 overflow-x-auto">
+          <table className="min-w-[720px] w-full text-sm">
+            <thead>
+              <tr className="text-[11px] text-zinc-500 border-b border-zinc-800">
+                <th className="text-left py-2 pr-3 font-medium">Time</th>
+                <th className="text-left py-2 pr-3 font-medium">Symbol</th>
+                <th className="text-left py-2 pr-3 font-medium">Side</th>
+                <th className="text-right py-2 pr-3 font-medium">PnL</th>
+                <th className="text-right py-2 pr-3 font-medium">Size</th>
+                <th className="text-right py-2 pr-3 font-medium">Entry</th>
+                <th className="text-right py-2 pr-3 font-medium">Exit</th>
+                <th className="text-left py-2 font-medium">Notes</th>
+              </tr>
+            </thead>
+            <tbody>
+              {dayTrades.map((t) => {
+                const pnl = Number(t.pnl) || 0;
+                const time = fmtUTCTime(tradeTime(t));
+                const sym = String(t.symbol || "—");
+                const side = String(t.side || "—").toUpperCase();
+                const size = t.size ?? "";
+                const entry = t.entry_price ?? "";
+                const exit = t.exit_price ?? "";
+                const notes = String(t.notes || "");
+
+                return (
+                  <tr key={t.id || `${sym}-${time}-${pnl}`} className="border-b border-zinc-900/80">
+                    <td className="py-2 pr-3 text-zinc-300 tabular-nums">{time}</td>
+                    <td className="py-2 pr-3 text-zinc-200">{sym}</td>
+                    <td className="py-2 pr-3 text-zinc-300">{side}</td>
+                    <td className={`py-2 pr-3 text-right tabular-nums ${pnlTextClass(pnl)}`}>
+                      ${fmtMoney(pnl)}
+                    </td>
+                    <td className="py-2 pr-3 text-right text-zinc-300 tabular-nums">
+                      {size === "" ? "—" : size}
+                    </td>
+                    <td className="py-2 pr-3 text-right text-zinc-300 tabular-nums">
+                      {entry === "" ? "—" : entry}
+                    </td>
+                    <td className="py-2 pr-3 text-right text-zinc-300 tabular-nums">
+                      {exit === "" ? "—" : exit}
+                    </td>
+                    <td className="py-2 text-zinc-400">
+                      {notes ? (
+                        <span title={notes}>
+                          {notes.length > 40 ? notes.slice(0, 40) + "…" : notes}
+                        </span>
+                      ) : (
+                        "—"
+                      )}
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </div>
+  );
+}
+
 function PnLCalendar({ trades }) {
-  // Default: current month (UTC)
   const now = new Date();
   const [year, setYear] = useState(now.getUTCFullYear());
   const [month, setMonth] = useState(now.getUTCMonth()); // 0-11
+  const [selectedDayKey, setSelectedDayKey] = useState("");
 
   const dailyMap = useMemo(() => buildDailyMap(trades), [trades]);
 
@@ -337,36 +505,36 @@ function PnLCalendar({ trades }) {
   };
 
   const navPrev = () => {
+    setSelectedDayKey("");
     const m = month - 1;
     if (m < 0) {
       setMonth(11);
       setYear((y) => y - 1);
-    } else {
-      setMonth(m);
-    }
+    } else setMonth(m);
   };
 
   const navNext = () => {
+    setSelectedDayKey("");
     const m = month + 1;
     if (m > 11) {
       setMonth(0);
       setYear((y) => y + 1);
-    } else {
-      setMonth(m);
-    }
+    } else setMonth(m);
   };
 
   const dow = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+
+  const selectedTrades = useMemo(() => tradesForDayUTC(trades, selectedDayKey), [trades, selectedDayKey]);
 
   return (
     <div className="space-y-3">
       <div className="flex items-center justify-between gap-3">
         <div>
           <div className="text-xs text-zinc-500">
-            Daily net PnL. Hover for details.
+            Daily results view. Click any day to review trades.
           </div>
           <div className="mt-1 text-[11px] text-zinc-600">
-            Trades in filtered sample:{" "}
+            Trades in current view:{" "}
             <span className="text-zinc-200 tabular-nums">{trades.length}</span>
           </div>
         </div>
@@ -398,7 +566,6 @@ function PnLCalendar({ trades }) {
 
       <div className="rounded-2xl border border-zinc-800 bg-zinc-950/40 p-3 overflow-x-auto">
         <div className="min-w-[760px]">
-          {/* DOW header */}
           <div className="grid grid-cols-7 gap-2 mb-2">
             {dow.map((d) => (
               <div key={d} className="text-[11px] text-zinc-500 text-center">
@@ -407,7 +574,6 @@ function PnLCalendar({ trades }) {
             ))}
           </div>
 
-          {/* Weeks */}
           <div className="space-y-2">
             {weeks.map((w, wi) => (
               <div key={wi} className="grid grid-cols-7 gap-2">
@@ -432,13 +598,19 @@ function PnLCalendar({ trades }) {
                   const bg = isPos ? CHART.pos : isNeg ? CHART.neg : "#27272a";
                   const op = count ? 0.15 + 0.65 * intensity(pnl) : 0.08;
 
-                  const title = `${key}\nPnL: $${fmtMoney(pnl)}\nTrades: ${count}`;
+                  const isSelected = selectedDayKey === key;
 
                   return (
-                    <div
+                    <button
                       key={di}
-                      title={title}
-                      className="h-20 rounded-xl border border-zinc-800 p-2 flex flex-col justify-between"
+                      type="button"
+                      title={`${key}\nPnL: $${fmtMoney(pnl)}\nTrades: ${count}`}
+                      onClick={() => setSelectedDayKey(key)}
+                      className={[
+                        "h-20 rounded-xl border p-2 flex flex-col justify-between text-left",
+                        "hover:border-zinc-600 focus:outline-none focus:ring-2 focus:ring-zinc-500/40",
+                        isSelected ? "border-zinc-200" : "border-zinc-800",
+                      ].join(" ")}
                       style={{ backgroundColor: bg, opacity: op }}
                     >
                       <div className="flex items-center justify-between">
@@ -455,7 +627,7 @@ function PnLCalendar({ trades }) {
                       <div className={`text-xs font-semibold tabular-nums ${pnlTextClass(pnl)}`}>
                         {count ? `$${fmtMoney(pnl)}` : "—"}
                       </div>
-                    </div>
+                    </button>
                   );
                 })}
               </div>
@@ -463,15 +635,21 @@ function PnLCalendar({ trades }) {
           </div>
 
           <div className="mt-2 text-[11px] text-zinc-600">
-            Intensity scales to max absolute daily PnL in the current filtered sample.
+            Darker intensity means a larger win/loss day (relative to this month’s results).
           </div>
+
+          <DayTradesPanel
+            dayKey={selectedDayKey}
+            dayTrades={selectedTrades}
+            onClear={() => setSelectedDayKey("")}
+          />
         </div>
       </div>
     </div>
   );
 }
 
-// ---- Main Page -------------------------------------------------------------
+// ---- Main page --------------------------------------------------------------
 
 export default function Analytics() {
   const [searchParams, setSearchParams] = useSearchParams();
@@ -485,13 +663,15 @@ export default function Analytics() {
   const symbol = searchParams.get("symbol") || "";
   const side = searchParams.get("side") || "";
 
-  // Controlled inputs for filter UI
+  // Controlled inputs
   const [uiFrom, setUiFrom] = useState(from);
   const [uiTo, setUiTo] = useState(to);
   const [uiSymbol, setUiSymbol] = useState(symbol);
   const [uiSide, setUiSide] = useState(side);
 
-  // Keep UI inputs synced if URL changes externally
+  // Rolling window selector (consumer-friendly options)
+  const [edgeWindow, setEdgeWindow] = useState(30);
+
   useEffect(() => {
     setUiFrom(from);
     setUiTo(to);
@@ -519,7 +699,6 @@ export default function Analytics() {
         return;
       }
 
-      // Scope to user_id and order by executed_at (chronological)
       const { data, error } = await supabase
         .from("trades")
         .select("*")
@@ -578,7 +757,6 @@ export default function Analytics() {
       out = out.filter((t) => String(t.side || "").toUpperCase() === sd);
     }
 
-    // Ensure stable chronological order (executed_at primary)
     out.sort((a, b) => {
       const da = new Date(tradeTime(a)).getTime();
       const db = new Date(tradeTime(b)).getTime();
@@ -588,17 +766,21 @@ export default function Analytics() {
     return out;
   }, [trades, from, to, symbol, side]);
 
-  const equity = useMemo(() => equitySeries(sample), [sample]);
-  const daily = useMemo(() => dailyPnL(sample), [sample]); // kept for future charts / sanity checks
-  const rollExp = useMemo(() => rollingExpectancy(sample, 30), [sample]);
   const stats = useMemo(() => computeStats(sample), [sample]);
+  const equity = useMemo(() => equitySeries(sample), [sample]);
+  const daily = useMemo(() => dailyPnL(sample), [sample]);
+  const edgeSeries = useMemo(
+    () => rollingExpectancyWithBands(sample, edgeWindow),
+    [sample, edgeWindow]
+  );
 
   const applyFilters = () => {
     const next = new URLSearchParams();
 
     if (uiFrom && uiFrom.trim()) next.set("from", uiFrom.trim());
     if (uiTo && uiTo.trim()) next.set("to", uiTo.trim());
-    if (uiSymbol && uiSymbol.trim()) next.set("symbol", uiSymbol.trim().toUpperCase());
+    if (uiSymbol && uiSymbol.trim())
+      next.set("symbol", uiSymbol.trim().toUpperCase());
     if (uiSide && uiSide.trim()) next.set("side", uiSide.trim().toUpperCase());
 
     setSearchParams(next, { replace: true });
@@ -612,27 +794,29 @@ export default function Analytics() {
     setSearchParams(new URLSearchParams(), { replace: true });
   };
 
-  if (loading) return <div className="p-6 text-sm text-zinc-400">Loading analytics…</div>;
+  if (loading) return <div className="p-6 text-sm text-zinc-400">Loading…</div>;
 
   return (
     <div className="p-5 space-y-5">
       <div className="flex flex-wrap items-end justify-between gap-3">
         <div>
-          <div className="text-xl font-semibold text-zinc-100">Analytics</div>
-          <div className="text-xs text-zinc-500 mt-1">Filters drive all charts on this page.</div>
+          <div className="text-xl font-semibold text-zinc-100">Performance Analytics</div>
+          <div className="text-xs text-zinc-500 mt-1">
+            Filter your trades to isolate patterns and measure performance.
+          </div>
         </div>
 
         <div className="flex flex-wrap items-center gap-2">
-          {from ? <FilterPill label="from" value={from} /> : null}
-          {to ? <FilterPill label="to" value={to} /> : null}
-          {symbol ? <FilterPill label="symbol" value={symbol} /> : null}
-          {side ? <FilterPill label="side" value={side} /> : null}
-          <FilterPill label="trades" value={String(stats.n)} />
-          {daily.length ? <FilterPill label="days" value={String(daily.length)} /> : null}
+          {from ? <FilterPill label="From" value={from} /> : null}
+          {to ? <FilterPill label="To" value={to} /> : null}
+          {symbol ? <FilterPill label="Symbol" value={symbol} /> : null}
+          {side ? <FilterPill label="Side" value={side} /> : null}
+          <FilterPill label="Trades" value={String(stats.n)} />
+          {daily.length ? <FilterPill label="Days" value={String(daily.length)} /> : null}
         </div>
       </div>
 
-      {/* FILTER BAR (functional) */}
+      {/* Filter Bar */}
       <div className="rounded-2xl bg-zinc-950/60 border border-zinc-800 p-4">
         <div className="grid grid-cols-1 md:grid-cols-5 gap-3">
           <div>
@@ -661,7 +845,7 @@ export default function Analytics() {
               className="mt-1 w-full rounded-md border border-zinc-800 bg-zinc-900 p-2 text-sm"
               value={uiSymbol}
               onChange={(e) => setUiSymbol(e.target.value)}
-              placeholder="MNQ"
+              placeholder="e.g. MNQ"
             />
           </div>
 
@@ -673,8 +857,8 @@ export default function Analytics() {
               onChange={(e) => setUiSide(e.target.value)}
             >
               <option value="">All</option>
-              <option value="LONG">LONG</option>
-              <option value="SHORT">SHORT</option>
+              <option value="LONG">Long</option>
+              <option value="SHORT">Short</option>
             </select>
           </div>
 
@@ -691,49 +875,52 @@ export default function Analytics() {
               onClick={clearFilters}
               className="w-full rounded-md border border-zinc-800 bg-zinc-950 px-4 py-2 text-sm text-zinc-200 hover:bg-zinc-900"
             >
-              Clear
+              Reset
             </button>
           </div>
         </div>
 
         <div className="mt-2 text-[11px] text-zinc-600">
-          Date filters use <span className="text-zinc-300">executed_at</span> (fallback: created_at for legacy).
+          Tip: Use filters to evaluate one setup, one symbol, or one time period at a time.
         </div>
       </div>
 
-      {/* Top Stats */}
+      {/* Summary Tiles */}
       <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-3">
         <StatTile
-          label="Total PnL"
+          label="Net PnL"
           value={`$${fmtMoney(stats.total)}`}
           valueClass={pnlTextClass(stats.total)}
-          sub="sum pnl over filtered sample"
+          sub="Total profit/loss for the filtered trades"
         />
         <StatTile
           label="Profit Factor"
-          value={stats.pf === Infinity ? "∞" : String(stats.pf)}
-          sub="gross wins / abs(gross losses)"
+          value={stats.pf === Infinity ? "∞" : Number(stats.pf).toFixed(2)}
+          sub="Gross wins ÷ gross losses"
         />
         <StatTile
-          label="Avg PnL / Trade (Expectancy)"
+          label="Average PnL per Trade"
           value={`$${fmtMoney(stats.expectancy)}`}
           valueClass={pnlTextClass(stats.expectancy)}
-          sub="mean pnl per trade"
+          sub="Helps estimate your trade expectancy"
         />
         <StatTile
           label="Max Drawdown"
           value={`$${fmtMoney(stats.maxDD)}`}
           valueClass={pnlTextClass(-stats.maxDD)}
-          sub="peak-to-trough equity drawdown"
+          sub="Largest peak-to-trough decline"
         />
       </div>
 
       {/* Equity Curve */}
-      <Card title="Equity Curve" subtitle="Cumulative PnL over time.">
+      <Card
+        title="Equity Curve"
+        subtitle="Cumulative performance over the filtered trades (ordered by executed time)."
+      >
         <div className="h-[280px]">
           {equity.length === 0 ? (
             <div className="h-full flex items-center justify-center text-sm text-zinc-500">
-              No trades for current filters.
+              No trades match your current filters.
             </div>
           ) : (
             <ResponsiveContainer>
@@ -741,7 +928,7 @@ export default function Analytics() {
                 <CartesianGrid stroke={CHART.grid} strokeDasharray="3 3" />
                 <XAxis dataKey="i" tick={{ fill: CHART.axis, fontSize: 11 }} />
                 <YAxis tick={{ fill: CHART.axis, fontSize: 11 }} />
-                <Tooltip content={<DarkTooltip />} cursor={{ fill: "transparent" }} />
+                <Tooltip content={<EquityTooltip />} cursor={{ fill: "transparent" }} />
                 <ReferenceLine y={0} stroke={CHART.zero} />
                 <Area
                   type="monotone"
@@ -769,28 +956,70 @@ export default function Analytics() {
         </div>
       </Card>
 
-      {/* Rolling Expectancy */}
+      {/* Edge Confidence */}
       <Card
-        title="Rolling 30-Trade Avg PnL (Expectancy)"
-        subtitle="Edge stability monitor: rolling mean PnL over the last 30 trades."
+        title="Edge Trend"
+        subtitle="Average PnL per trade with a confidence range (consistency indicator)."
       >
+        <div className="flex flex-wrap items-end justify-between gap-3 mb-3">
+          <div className="text-[11px] text-zinc-600">
+            If the average stays above $0 and the range is tight, your edge is more stable.
+          </div>
+
+          <div className="flex items-center gap-2">
+            <div className="text-xs text-zinc-500">Lookback</div>
+            <select
+              className="rounded-md border border-zinc-800 bg-zinc-900 px-3 py-2 text-sm text-zinc-200"
+              value={edgeWindow}
+              onChange={(e) => setEdgeWindow(Number(e.target.value))}
+            >
+              <option value={10}>Last 10 trades</option>
+              <option value={30}>Last 30 trades (recommended)</option>
+              <option value={50}>Last 50 trades</option>
+              <option value={100}>Last 100 trades</option>
+            </select>
+          </div>
+        </div>
+
         <div className="h-[280px]">
-          {rollExp.length === 0 ? (
+          {edgeSeries.length === 0 ? (
             <div className="h-full flex items-center justify-center text-sm text-zinc-500">
-              No trades for current filters.
+              No trades match your current filters.
             </div>
           ) : (
             <ResponsiveContainer>
-              <LineChart data={rollExp}>
+              <LineChart data={edgeSeries}>
                 <CartesianGrid stroke={CHART.grid} strokeDasharray="3 3" />
                 <XAxis dataKey="i" tick={{ fill: CHART.axis, fontSize: 11 }} />
                 <YAxis tick={{ fill: CHART.axis, fontSize: 11 }} />
-                <Tooltip content={<DarkTooltip />} cursor={{ fill: "transparent" }} />
+                <Tooltip content={<RollingBandsTooltip />} cursor={{ fill: "transparent" }} />
                 <ReferenceLine y={0} stroke={CHART.zero} />
+
+                {/* Confidence range (dotted lines) */}
                 <Line
                   type="monotone"
-                  dataKey="expPos"
-                  name="Avg PnL +"
+                  dataKey="upper"
+                  name="Upper range"
+                  stroke={CHART.band}
+                  strokeWidth={1}
+                  dot={false}
+                  strokeDasharray="4 4"
+                />
+                <Line
+                  type="monotone"
+                  dataKey="lower"
+                  name="Lower range"
+                  stroke={CHART.band}
+                  strokeWidth={1}
+                  dot={false}
+                  strokeDasharray="4 4"
+                />
+
+                {/* Average line split pos/neg */}
+                <Line
+                  type="monotone"
+                  dataKey="meanPos"
+                  name="Average (≥ 0)"
                   stroke={CHART.pos}
                   strokeWidth={2}
                   dot={false}
@@ -798,8 +1027,8 @@ export default function Analytics() {
                 />
                 <Line
                   type="monotone"
-                  dataKey="expNeg"
-                  name="Avg PnL -"
+                  dataKey="meanNeg"
+                  name="Average (< 0)"
                   stroke={CHART.neg}
                   strokeWidth={2}
                   dot={false}
@@ -812,7 +1041,10 @@ export default function Analytics() {
       </Card>
 
       {/* PnL Calendar */}
-      <Card title="PnL Calendar" subtitle="Full monthly calendar with daily net PnL.">
+      <Card
+        title="PnL Calendar"
+        subtitle="Monthly overview of daily results. Click a day to review the trades."
+      >
         <PnLCalendar trades={sample} />
       </Card>
     </div>
